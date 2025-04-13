@@ -4,7 +4,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "bun run index.ts"
+    "dev": "bun run --watch index.ts"
   },
   "devDependencies": {
     "@types/bun": "latest"
