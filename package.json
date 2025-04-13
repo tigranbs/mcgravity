@@ -1,10 +1,11 @@
 {
   "name": "mcgravity",
-  "module": "index.ts",
+  "module": "src/index.ts",
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "bun run --watch index.ts"
+    "dev": "bun run --watch index.ts",
+    "build": "bun build ./src/index.ts --compile --outfile mcgravity"
   },
   "devDependencies": {
     "@types/bun": "latest"
