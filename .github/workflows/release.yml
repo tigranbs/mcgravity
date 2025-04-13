@@ -11,28 +11,9 @@ permissions:
   packages: write
 
 jobs:
-  build:
+  build-and-release:
     name: Build and Release
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux
-            arch: x64
-          - os: ubuntu-latest
-            platform: linux
-            arch: arm64
-          - os: macos-latest
-            platform: macos
-            arch: x64
-          - os: macos-latest
-            platform: macos
-            arch: arm64
-          - os: windows-latest
-            platform: windows
-            arch: x64
-
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -45,33 +26,49 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Build binary
-        run: bun build ./src/index.ts --compile --outfile mcgravity-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.platform == 'windows' && '.exe' || '' }}
+      - name: Build Linux (x64)
+        run: bun build ./src/index.ts --compile --target bun-linux-x64 --minify --sourcemap --bytecode --outfile mcgravity-linux-x64
+        shell: bash
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: mcgravity-${{ matrix.platform }}-${{ matrix.arch }}
-          path: mcgravity-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.platform == 'windows' && '.exe' || '' }}
-          if-no-files-found: error
+      - name: Build Linux (arm64)
+        run: bun build ./src/index.ts --compile --target bun-linux-arm64 --minify --sourcemap --bytecode --outfile mcgravity-linux-arm64
+        shell: bash
 
-  release:
-    name: Create Release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Build macOS (x64)
+        run: bun build ./src/index.ts --compile --target bun-darwin-x64 --minify --sourcemap --bytecode --outfile mcgravity-macos-x64
+        shell: bash
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
+      - name: Build macOS (arm64)
+        run: bun build ./src/index.ts --compile --target bun-darwin-arm64 --minify --sourcemap --bytecode --outfile mcgravity-macos-arm64
+        shell: bash
+
+      - name: Build Windows (x64)
+        run: bun build ./src/index.ts --compile --target bun-windows-x64 --minify --sourcemap --bytecode --outfile mcgravity-windows-x64.exe
+        shell: bash
+
+      - name: Set executable permissions
+        run: |
+          chmod +x mcgravity-linux-x64
+          chmod +x mcgravity-linux-arm64
+          chmod +x mcgravity-macos-x64
+          chmod +x mcgravity-macos-arm64
+        shell: bash
+
+      - name: Create zip archives for macOS
+        run: |
+          zip -j mcgravity-macos-x64.zip mcgravity-macos-x64
+          zip -j mcgravity-macos-arm64.zip mcgravity-macos-arm64
+        shell: bash
 
       - name: Create release
         uses: softprops/action-gh-release@v1
         with:
-          files: artifacts/**/*
+          files: |
+            mcgravity-linux-x64
+            mcgravity-linux-arm64
+            mcgravity-macos-x64.zip
+            mcgravity-macos-arm64.zip
+            mcgravity-windows-x64.exe
           draft: false
           prerelease: false
           generate_release_notes: true
