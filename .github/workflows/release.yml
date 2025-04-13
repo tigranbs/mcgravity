@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
@@ -54,10 +56,60 @@ jobs:
           chmod +x mcgravity-macos-arm64
         shell: bash
 
-      - name: Create zip archives for macOS
+      - name: Generate SHA256 checksums
         run: |
-          zip -j mcgravity-macos-x64.zip mcgravity-macos-x64
-          zip -j mcgravity-macos-arm64.zip mcgravity-macos-arm64
+          sha256sum mcgravity-linux-x64 mcgravity-linux-arm64 mcgravity-macos-x64 mcgravity-macos-arm64 mcgravity-windows-x64.exe > checksums.txt
+        shell: bash
+
+      - name: Create entitlements.plist for macOS
+        run: |
+          cat > entitlements.plist << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>com.apple.security.cs.allow-jit</key>
+              <true/>
+              <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+              <true/>
+              <key>com.apple.security.cs.disable-executable-page-protection</key>
+              <true/>
+              <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+              <true/>
+              <key>com.apple.security.cs.disable-library-validation</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+        shell: bash
+
+      - name: Create zip archives for macOS with instructions
+        run: |
+          # Create readme file with instructions
+          cat > macos-instructions.txt << EOF
+          ## Running mcgravity on macOS
+
+          If you encounter an error about the application being damaged or from an unidentified developer:
+
+          1. Open Terminal
+          2. Navigate to the folder containing the mcgravity binary
+          3. Make it executable:
+             chmod +x mcgravity-macos-x64
+          4. Run the binary:
+             ./mcgravity-macos-x64
+
+          Alternatively, you can allow the app by:
+          1. Right-clicking (or Control+clicking) on the app
+          2. Select "Open" from the context menu
+          3. Click "Open" in the dialog that appears
+
+          You can also run this command to remove the quarantine attribute:
+          xattr -d com.apple.quarantine mcgravity-macos-x64
+          EOF
+
+          # Add the instructions to the zip packages
+          zip -j mcgravity-macos-x64.zip mcgravity-macos-x64 macos-instructions.txt entitlements.plist
+          zip -j mcgravity-macos-arm64.zip mcgravity-macos-arm64 macos-instructions.txt entitlements.plist
         shell: bash
 
       - name: Create release
@@ -69,8 +121,34 @@ jobs:
             mcgravity-macos-x64.zip
             mcgravity-macos-arm64.zip
             mcgravity-windows-x64.exe
+            checksums.txt
+            entitlements.plist
           draft: false
           prerelease: false
           generate_release_notes: true
+          body: |
+            ## Installation Instructions
+
+            ### macOS Users:
+
+            If you get a "damaged" or "cannot be opened because it is from an unidentified developer" message:
+
+            1. Open Terminal and navigate to the downloaded file
+            2. Remove the quarantine attribute with:
+               ```
+               xattr -d com.apple.quarantine mcgravity-macos-x64
+               ```
+            3. Make the file executable with:
+               ```
+               chmod +x mcgravity-macos-x64
+               ```
+
+            Alternatively, right-click (or Control+click) the file and select "Open" from the context menu.
+
+            ### Checksums:
+
+            SHA256 checksums are provided in `checksums.txt`
+
+            For developers distributing custom builds, an `entitlements.plist` file is included for proper code signing.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
