@@ -22,25 +22,49 @@ export class McpServerComposer {
     this.server = new McpServer(serverInfo);
   }
 
-  async addTargetServer(targetServerUrl: URL, clientInfo: Implementation) {
+  async addTargetServer(targetServerUrl: URL, clientInfo: Implementation, skipRegister = false): Promise<void> {
     const targetClient = new Client(clientInfo);
-    await targetClient.connect(new SSEClientTransport(targetServerUrl));
+    try {
+      await targetClient.connect(new SSEClientTransport(targetServerUrl));
+    } catch (error) {
+      console.error(`Failed to connect to ${targetServerUrl} -> ${clientInfo.name}`, (error as Error).message);
+
+      // If the connection fails, retry after 10 seconds
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          resolve(this.addTargetServer(targetServerUrl, clientInfo, skipRegister));
+        }, 10000);
+      });
+    }
+
+    console.log(`Connected to ${targetServerUrl} -> ${clientInfo.name}`);
+
     const name = targetServerUrl.toString();
 
-    const tools = await targetClient.listTools();
-    this.composeTools(tools.tools, name);
-
-    const resources = await targetClient.listResources();
-    this.composeResources(resources.resources, name);
-
-    const prompts = await targetClient.listPrompts();
-    this.composePrompts(prompts.prompts, name);
+    targetClient.onclose = this.handleTargetServerClose(name, targetServerUrl, clientInfo);
+    targetClient.onerror = this.handleTargetServerClose(name, targetServerUrl, clientInfo);
 
     this.targetClients.set(name, targetClient);
 
-    targetClient.onclose = () => {
-      this.targetClients.delete(name);
-    };
+    if (skipRegister) {
+      console.log(`Skipping capabilities registration for ${name}`);
+      return;
+    }
+
+    console.log(`Registering capabilities for ${name}`);
+    const tools = await targetClient.listTools();
+    this.composeTools(tools.tools, name);
+    console.log(`Registered ${tools.tools.length} tools for ${name}`);
+
+    const resources = await targetClient.listResources();
+    this.composeResources(resources.resources, name);
+    console.log(`Registered ${resources.resources.length} resources for ${name}`);
+
+    const prompts = await targetClient.listPrompts();
+    this.composePrompts(prompts.prompts, name);
+    console.log(`Registered ${prompts.prompts.length} prompts for ${name}`);
+
+    console.log(`Capabilities registration for ${name} completed`);
   }
 
   listTargetClients() {
@@ -125,5 +149,13 @@ export class McpServerComposer {
         }
       );
     }
+  }
+
+  private handleTargetServerClose(name: string, targetServerUrl: URL, clientInfo: Implementation) {
+    return () => {
+      this.targetClients.delete(name);
+      console.error(`Disconnected from ${name} [${targetServerUrl}] -> ${clientInfo.name}. Retrying in 10 seconds...`);
+      return this.addTargetServer(targetServerUrl, clientInfo, true);
+    };
   }
 }

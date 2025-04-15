@@ -34,6 +34,32 @@ export class McGravityServer {
       idleTimeout: -1,
       routes: {
         "/": () => {
+          const transport = new BunSSEServerTransport("/sessions");
+          this.serverComposer.server.connect(transport);
+          transport.onclose = () => {
+            console.log(`Session ${transport.sessionId} closed`);
+            delete this.transports[transport.sessionId];
+          };
+          this.transports[transport.sessionId] = transport;
+          console.log(`Session ${transport.sessionId} opened`);
+          return transport.createResponse();
+        },
+        "/sessions": (req) => {
+          const url = new URL(req.url);
+          const sessionId = url.searchParams.get("sessionId");
+          if (!sessionId || !this.transports[sessionId]) {
+            return new Response("Invalid session ID", { status: 400 });
+          }
+          return this.transports[sessionId].handlePostMessage(req);
+        },
+
+        // Health check endpoint
+        "/health": () => {
+          return new Response("OK", { status: 200 });
+        },
+
+        // API endpoints
+        "/api/list-targets": () => {
           return new Response(
             JSON.stringify(this.serverComposer.listTargetClients()),
             {
@@ -42,23 +68,6 @@ export class McGravityServer {
               },
             }
           );
-        },
-        "/sse": () => {
-          const transport = new BunSSEServerTransport("/messages");
-          this.serverComposer.server.connect(transport);
-          transport.onclose = () => {
-            delete this.transports[transport.sessionId];
-          };
-          this.transports[transport.sessionId] = transport;
-          return transport.createResponse();
-        },
-        "/messages": (req) => {
-          const url = new URL(req.url);
-          const sessionId = url.searchParams.get("sessionId");
-          if (!sessionId || !this.transports[sessionId]) {
-            return new Response("Invalid session ID", { status: 400 });
-          }
-          return this.transports[sessionId].handlePostMessage(req);
         },
       },
       fetch(req) {

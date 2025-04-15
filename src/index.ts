@@ -32,6 +32,7 @@ Options:
 
 Examples:
   mcgravity --host localhost --port 3001 http://mcp1.example.com http://mcp2.example.com
+  mcgravity --config config.yaml
 `);
 }
 
