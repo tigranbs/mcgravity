@@ -1,5 +1,9 @@
 # McGravity
 
+<div align="center">
+  <img src="./assets/thumbnail.png" alt="McGravity Thumbnail" width="200">
+</div>
+
 ## About
 McGravity is a tool that connects multiple MCP (Machine Communication Protocol) servers into one unified service. It lets you reuse the same MCP server and scale underlying MCP server connections almost infinitely.
 
