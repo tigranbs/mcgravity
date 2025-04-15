@@ -1,0 +1,8 @@
+node_modules/
+dist/
+build/
+*.lock
+*.log
+.git/
+.vscode/
+LICENSE 

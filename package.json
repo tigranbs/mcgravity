@@ -7,12 +7,23 @@
     "dev": "bun run --watch index.ts",
     "build": "bun build ./src/index.ts --compile --outfile mcgravity",
     "test": "bun test",
-    "test:integration": "bun run ./test/run-integration-tests.ts"
+    "test:integration": "bun run ./test/run-integration-tests.ts",
+    "lint": "eslint --ext .ts,.tsx,.js,.jsx .",
+    "lint:fix": "eslint --ext .ts,.tsx,.js,.jsx . --fix",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\""
   },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.14.1",
+    "@typescript-eslint/eslint-plugin": "^8.30.1",
+    "@typescript-eslint/parser": "^8.30.1",
+    "eslint": "^9.24.0",
+    "eslint-config-prettier": "^10.1.2",
+    "eslint-plugin-prettier": "^5.2.6",
+    "prettier": "^3.5.3",
+    "typescript-eslint": "^8.30.1",
     "zod": "^3.24.2"
   },
   "peerDependencies": {

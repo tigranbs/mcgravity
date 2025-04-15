@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 
-import { parseArgs } from "node:util";
-import { McGravityServer } from "./server";
-import { loadConfig } from "./utils/config";
-import type { ConfigType, McpServerType } from "./utils/schemas";
+import { parseArgs } from 'node:util';
+import { McGravityServer } from './server';
+import { loadConfig } from './utils/config';
+import type { ConfigType, McpServerType } from './utils/schemas';
 
 interface CliOptions {
   host: string;
@@ -40,34 +40,34 @@ async function parseCliOptions(): Promise<CliOptions> {
   const { values, positionals } = parseArgs({
     options: {
       host: {
-        type: "string",
-        short: "h",
-        default: "localhost",
+        type: 'string',
+        short: 'h',
+        default: 'localhost',
       },
       port: {
-        type: "string",
-        short: "p",
-        default: "3001",
+        type: 'string',
+        short: 'p',
+        default: '3001',
       },
       config: {
-        type: "string",
-        short: "c",
-        default: "config.yaml",
+        type: 'string',
+        short: 'c',
+        default: 'config.yaml',
       },
       help: {
-        type: "boolean",
-        short: "?",
+        type: 'boolean',
+        short: '?',
         default: false,
       },
-      "mcp-version": {
-        type: "string",
-        short: "v",
-        default: "1.0.0",
+      'mcp-version': {
+        type: 'string',
+        short: 'v',
+        default: '1.0.0',
       },
-      "mcp-name": {
-        type: "string",
-        short: "n",
-        default: "mcgravity",
+      'mcp-name': {
+        type: 'string',
+        short: 'n',
+        default: 'mcgravity',
       },
     },
     allowPositionals: true,
@@ -75,7 +75,7 @@ async function parseCliOptions(): Promise<CliOptions> {
 
   let configFile: string | undefined = values.config;
   if (!configFile) {
-    configFile = "config.yaml";
+    configFile = 'config.yaml';
   }
   const configExists = await Bun.file(configFile).exists();
   if (!configExists) {
@@ -83,12 +83,12 @@ async function parseCliOptions(): Promise<CliOptions> {
   }
 
   return {
-    host: values.host || "localhost",
+    host: values.host || 'localhost',
     port: parseInt(values.port as string) || 3001,
     help: values.help || false,
     mcpServers: positionals,
-    mcpVersion: values["mcp-version"] || "1.0.0",
-    mcpName: values["mcp-name"] || "mcgravity",
+    mcpVersion: values['mcp-version'] || '1.0.0',
+    mcpName: values['mcp-name'] || 'mcgravity',
     config: configFile,
   };
 }
@@ -118,11 +118,13 @@ async function main() {
     }));
   }
 
-  const server = new McGravityServer({
-    name: mcGravityConfig?.name || options.mcpName,
-    version: mcGravityConfig?.version || options.mcpVersion,
-    description: mcGravityConfig?.description || "",
-  }, {
+  const server = new McGravityServer(
+    {
+      name: mcGravityConfig?.name || options.mcpName,
+      version: mcGravityConfig?.version || options.mcpVersion,
+      description: mcGravityConfig?.description || '',
+    },
+    {
       port: options.port,
       host: options.host,
     }
@@ -130,10 +132,10 @@ async function main() {
 
   await server.loadTargets(mcpServers);
   server.start();
-  console.log("Server started on", options.host, options.port);
+  console.log('Server started on', options.host, options.port);
 }
 
 main().catch((error) => {
-  console.error("Error:", error);
+  console.error('Error:', error);
   process.exit(1);
 });

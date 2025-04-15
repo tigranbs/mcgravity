@@ -43,6 +43,7 @@ The `echo-server.test.ts` file tests integration with the example echo server. I
 ## CI Integration
 
 These tests are automatically run as part of the GitHub Actions CI pipeline. The workflow runs on:
+
 - Push events to the main branch
 - Pull request events targeting the main branch
 - Manual triggers via workflow_dispatch
@@ -58,4 +59,4 @@ To add a new integration test:
 3. Follow the pattern in the existing tests:
    - Start necessary servers in `beforeAll`
    - Clean up servers in `afterAll`
-   - Write test cases that verify McGravity's functionality 
+   - Write test cases that verify McGravity's functionality

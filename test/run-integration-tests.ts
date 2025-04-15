@@ -1,16 +1,16 @@
 #!/usr/bin/env bun
 
-import { readdirSync } from "fs";
-import { join } from "path";
-import { spawnSync } from "child_process";
+import { readdirSync } from 'fs';
+import { join } from 'path';
+import { spawnSync } from 'child_process';
 
-const TEST_TIMEOUT = "30000"; // 30 seconds timeout for integration tests
+const TEST_TIMEOUT = '30000'; // 30 seconds timeout for integration tests
 
 // Get test files
-const testDir = join(import.meta.dir, "integration");
+const testDir = join(import.meta.dir, 'integration');
 const testFiles = readdirSync(testDir)
-  .filter(file => file.endsWith(".test.ts"))
-  .map(file => join(testDir, file));
+  .filter((file) => file.endsWith('.test.ts'))
+  .map((file) => join(testDir, file));
 
 console.log(`Running ${testFiles.length} integration tests...\n`);
 
@@ -18,14 +18,14 @@ let failedTests = 0;
 
 for (const testFile of testFiles) {
   console.log(`Running test: ${testFile}`);
-  const result = spawnSync("bun", ["test", testFile], {
-    stdio: "inherit", // Show output directly
+  const result = spawnSync('bun', ['test', testFile], {
+    stdio: 'inherit', // Show output directly
     env: {
       ...process.env,
-      BUN_TEST_TIMEOUT: TEST_TIMEOUT
-    }
+      BUN_TEST_TIMEOUT: TEST_TIMEOUT,
+    },
   });
-  
+
   if (result.status !== 0) {
     console.error(`Test failed: ${testFile}`);
     failedTests++;
@@ -38,4 +38,4 @@ if (failedTests > 0) {
   process.exit(1);
 }
 
-console.log("\nAll integration tests passed!"); 
+console.log('\nAll integration tests passed!');

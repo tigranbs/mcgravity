@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
+import { randomUUID } from 'node:crypto';
+import { JSONRPCMessageSchema, type JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 
 /**
  * Server transport for SSE using Bun's Response type.
@@ -10,9 +10,9 @@ export class BunSSEServerTransport {
   private _sseResponse?: Response;
   private _responseObj?: Response;
   private _writer?: WritableStreamDefaultWriter<Uint8Array>;
-  onmessage?: (message: any) => void;
+  onmessage?: (message: JSONRPCMessage) => void;
   onclose?: () => void;
-  onerror?: (error: any) => void;
+  onerror?: (error: Error) => void;
 
   /**
    * Creates a new SSE server transport for Bun.
@@ -39,18 +39,16 @@ export class BunSSEServerTransport {
     const encoder = new TextEncoder();
     this._writer.write(
       encoder.encode(
-        `event: endpoint\ndata: ${encodeURI(this._endpoint)}?sessionId=${
-          this._sessionId
-        }\n\n`
+        `event: endpoint\ndata: ${encodeURI(this._endpoint)}?sessionId=${this._sessionId}\n\n`
       )
     );
 
     // Create the response
     this._responseObj = new Response(readable, {
       headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache, no-transform",
-        Connection: "keep-alive",
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
       },
     });
 
@@ -73,25 +71,22 @@ export class BunSSEServerTransport {
    */
   async handlePostMessage(req: Request): Promise<Response> {
     if (!this._sseResponse) {
-      const message = "SSE connection not established";
+      const message = 'SSE connection not established';
       return new Response(message, { status: 500 });
     }
 
     try {
-      const contentTypeHeader = req.headers.get("content-type");
-      if (
-        !contentTypeHeader ||
-        !contentTypeHeader.includes("application/json")
-      ) {
+      const contentTypeHeader = req.headers.get('content-type');
+      if (!contentTypeHeader || !contentTypeHeader.includes('application/json')) {
         throw new Error(`Unsupported content-type: ${contentTypeHeader}`);
       }
 
       const body = await req.json();
-      await this.handleMessage(body);
+      await this.handleMessage(body as JSONRPCMessage);
 
-      return new Response("Accepted", { status: 202 });
+      return new Response('Accepted', { status: 202 });
     } catch (error) {
-      this.onerror?.(error);
+      this.onerror?.(error as Error);
       return new Response(String(error), { status: 400 });
     }
   }
@@ -99,18 +94,16 @@ export class BunSSEServerTransport {
   /**
    * Handle a client message, regardless of how it arrived.
    */
-  async handleMessage(message: any) {
+  async handleMessage(message: JSONRPCMessage) {
     try {
       const parseResult = JSONRPCMessageSchema.safeParse(message);
       if (parseResult.success) {
         this.onmessage?.(parseResult.data);
       } else {
-        throw new Error(
-          `Invalid JSON-RPC message: ${parseResult.error.message}`
-        );
+        throw new Error(`Invalid JSON-RPC message: ${parseResult.error.message}`);
       }
     } catch (error) {
-      this.onerror?.(error);
+      this.onerror?.(error as Error);
       throw error;
     }
   }
@@ -131,15 +124,13 @@ export class BunSSEServerTransport {
   /**
    * Send a message over the SSE connection.
    */
-  async send(message: any) {
+  async send(message: JSONRPCMessage) {
     if (!this._writer) {
-      throw new Error("Not connected");
+      throw new Error('Not connected');
     }
 
     const encoder = new TextEncoder();
-    this._writer.write(
-      encoder.encode(`event: message\ndata: ${JSON.stringify(message)}\n\n`)
-    );
+    this._writer.write(encoder.encode(`event: message\ndata: ${JSON.stringify(message)}\n\n`));
   }
 
   /**

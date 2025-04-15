@@ -1,18 +1,14 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import {
-  McpServer,
-  type PromptCallback,
-  type ResourceMetadata,
-} from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { McpServer, type ResourceMetadata } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type {
   Implementation,
   Tool,
   CallToolResult,
   Resource,
   Prompt,
-} from "@modelcontextprotocol/sdk/types.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import { jsonSchemaToZod } from "./utils/schema-converter";
+} from '@modelcontextprotocol/sdk/types.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { jsonSchemaToZod } from './utils/schema-converter';
 
 export class McpServerComposer {
   public readonly server: McpServer;
@@ -22,12 +18,19 @@ export class McpServerComposer {
     this.server = new McpServer(serverInfo);
   }
 
-  async addTargetServer(targetServerUrl: URL, clientInfo: Implementation, skipRegister = false): Promise<void> {
+  async addTargetServer(
+    targetServerUrl: URL,
+    clientInfo: Implementation,
+    skipRegister = false
+  ): Promise<void> {
     const targetClient = new Client(clientInfo);
     try {
       await targetClient.connect(new SSEClientTransport(targetServerUrl));
     } catch (error) {
-      console.error(`Failed to connect to ${targetServerUrl} -> ${clientInfo.name}`, (error as Error).message);
+      console.error(
+        `Failed to connect to ${targetServerUrl} -> ${clientInfo.name}`,
+        (error as Error).message
+      );
 
       // If the connection fails, retry after 10 seconds
       return new Promise((resolve) => {
@@ -88,23 +91,18 @@ export class McpServerComposer {
   private composeTools(tools: Tool[], name: string) {
     for (const tool of tools) {
       const schemaObject = jsonSchemaToZod(tool.inputSchema);
-      this.server.tool(
-        tool.name,
-        tool.description ?? "",
-        schemaObject,
-        async (args, extra) => {
-          const client = this.targetClients.get(name);
-          if (!client) {
-            throw new Error(`Client for ${name} not found`);
-          }
-
-          const result = await client.callTool({
-            name: tool.name,
-            arguments: args,
-          });
-          return result as CallToolResult;
+      this.server.tool(tool.name, tool.description ?? '', schemaObject, async (args) => {
+        const client = this.targetClients.get(name);
+        if (!client) {
+          throw new Error(`Client for ${name} not found`);
         }
-      );
+
+        const result = await client.callTool({
+          name: tool.name,
+          arguments: args,
+        });
+        return result as CallToolResult;
+      });
     }
   }
 
@@ -114,7 +112,7 @@ export class McpServerComposer {
         resource.name,
         resource.uri,
         { description: resource.description, mimeType: resource.mimeType },
-        async (uri, extra) => {
+        async (uri) => {
           const client = this.targetClients.get(name);
           if (!client) {
             throw new Error(`Client for ${name} not found`);
@@ -132,29 +130,26 @@ export class McpServerComposer {
   private composePrompts(prompts: Prompt[], name: string) {
     for (const prompt of prompts) {
       const argsSchema = jsonSchemaToZod(prompt.arguments);
-      this.server.prompt(
-        prompt.name,
-        prompt.description ?? "",
-        argsSchema,
-        async (args, extra) => {
-          const client = this.targetClients.get(name);
-          if (!client) {
-            throw new Error(`Client for ${name} not found`);
-          }
-
-          return await client.getPrompt({
-            name: prompt.name,
-            arguments: args,
-          });
+      this.server.prompt(prompt.name, prompt.description ?? '', argsSchema, async (args) => {
+        const client = this.targetClients.get(name);
+        if (!client) {
+          throw new Error(`Client for ${name} not found`);
         }
-      );
+
+        return await client.getPrompt({
+          name: prompt.name,
+          arguments: args,
+        });
+      });
     }
   }
 
   private handleTargetServerClose(name: string, targetServerUrl: URL, clientInfo: Implementation) {
     return () => {
       this.targetClients.delete(name);
-      console.error(`Disconnected from ${name} [${targetServerUrl}] -> ${clientInfo.name}. Retrying in 10 seconds...`);
+      console.error(
+        `Disconnected from ${name} [${targetServerUrl}] -> ${clientInfo.name}. Retrying in 10 seconds...`
+      );
       return this.addTargetServer(targetServerUrl, clientInfo, true);
     };
   }
