@@ -54,6 +54,20 @@ bun install
 bun build src/index.ts --compile --outfile mcgravity
 ```
 
+## Docker
+
+McGravity is available on Docker Hub: [tigranbs/mcgravity](https://hub.docker.com/r/tigranbs/mcgravity).
+
+```bash
+docker pull tigranbs/mcgravity
+
+# Basic usage
+docker run -p 3001:3001 tigranbs/mcgravity http://mcp1.example.com http://mcp2.example.com
+
+# With custom host and port
+docker run -p 4000:4000 tigranbs/mcgravity --host 0.0.0.0 --port 4000 http://mcp1.example.com
+```
+
 ## Usage
 
 Basic command:
