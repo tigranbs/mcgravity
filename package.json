@@ -8,12 +8,14 @@
     "build": "bun build ./src/index.ts --compile --outfile mcgravity"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/js-yaml": "^4.0.9"
   },
   "peerDependencies": {
     "typescript": "^5"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.9.0"
+    "@modelcontextprotocol/sdk": "^1.9.0",
+    "js-yaml": "^4.1.0"
   }
 }

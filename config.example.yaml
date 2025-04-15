@@ -1,0 +1,12 @@
+name: mcgravity
+version: 1.0.0
+description: A simple MCP server
+
+servers:
+  echo-server:
+    url: http://localhost:3000/sse
+    name: echo-server
+    version: 1.0.0
+    description: A simple echo server
+    tags:
+      - echo

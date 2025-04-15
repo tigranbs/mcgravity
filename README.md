@@ -60,11 +60,48 @@ With options:
 ./mcgravity --host localhost --port 3001 http://mcp1.example.com http://mcp2.example.com
 ```
 
+Using configuration file:
+```bash
+./mcgravity --config config.yaml
+```
+
 ### Options
 
 - `--host <host>`: Host to bind the server to (default: localhost)
 - `--port <port>`: Port to bind the server to (default: 3001)
+- `--config <path>`: Path to the config file (default: config.yaml)
+- `--mcp-version <version>`: Version of the MCP server (default: 1.0.0)
+- `--mcp-name <name>`: Name of the MCP server (default: mcgravity)
 - `--help`: Show help information
+
+### Configuration
+
+McGravity can be configured using a YAML file. See `config.example.yaml` for a sample configuration:
+
+```yaml
+name: mcgravity
+version: 1.0.0
+description: A simple MCP server
+
+servers:
+  echo-server:
+    url: http://localhost:3000/sse
+    name: echo-server
+    version: 1.0.0
+    description: A simple echo server
+    tags:
+      - echo
+```
+
+You can run the included echo server example for testing:
+
+```bash
+# Start the echo server first
+bun examples/echo-server.ts
+
+# Then start McGravity pointing to the echo server
+./mcgravity --config config.yaml
+```
 
 ## Examples
 

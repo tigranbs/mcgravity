@@ -1,6 +1,7 @@
 import type { Implementation } from "@modelcontextprotocol/sdk/types.js";
 import { McpServerComposer } from "./server-composer";
 import { BunSSEServerTransport } from "./bun-sse-transport";
+import type { McpServerType } from "./utils/schemas";
 
 export class McGravityServer {
   private readonly serverComposer: McpServerComposer;
@@ -16,12 +17,12 @@ export class McGravityServer {
     this.serverComposer = new McpServerComposer(serverInfo);
   }
 
-  async loadTargets(targetServers: string[]) {
+  async loadTargets(targetServers: McpServerType[]) {
     for (const targetServer of targetServers) {
-      const targetServerUrl = new URL(targetServer);
-      await this.serverComposer.addTargetServer(targetServerUrl, {
-        name: targetServerUrl.hostname,
-        version: "1.0.0",
+      await this.serverComposer.addTargetServer(new URL(targetServer.url), {
+        name: targetServer.name ?? new URL(targetServer.url).hostname,
+        version: targetServer.version ?? "1.0.0",
+        description: targetServer.description ?? "",
       });
     }
   }
