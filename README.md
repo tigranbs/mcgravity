@@ -1,7 +1,7 @@
 # McGravity
 
 <div align="center">
-  <img src="./assets/thumbnail.png" alt="McGravity Thumbnail" width="200">
+  <img src="./assets/thumbnail.png" alt="McGravity Thumbnail" width="400">
 </div>
 
 ## About
