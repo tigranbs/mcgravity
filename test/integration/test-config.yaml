@@ -1,0 +1,13 @@
+name: mcgravity-test
+version: 1.0.0
+description: Test configuration for McGravity
+
+servers:
+  echo-server:
+    url: http://localhost:3000/sse
+    name: echo-server-test
+    version: 1.0.0
+    description: A simple echo server for testing
+    tags:
+      - echo
+      - test 

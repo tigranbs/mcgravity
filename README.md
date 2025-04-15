@@ -115,6 +115,32 @@ Specify host and port:
 ./mcgravity --host 0.0.0.0 --port 4000 http://mcp1.example.com http://mcp2.example.com
 ```
 
+## Running Tests
+
+To run all tests:
+
+```bash
+bun test
+```
+
+To run integration tests only:
+
+```bash
+bun run test:integration
+```
+
+### Integration Tests
+
+The integration tests verify that McGravity can:
+
+1. Connect to an MCP server (the example echo server)
+2. Correctly proxy capabilities from the target MCP server
+3. Pass requests from clients to the target MCP server and return responses
+
+For more details about the test suite, see the [test README](test/README.md).
+
+The tests are automatically run in GitHub Actions CI on push and PR events.
+
 ## Future Plans
 
 McGravity will expand to include:
