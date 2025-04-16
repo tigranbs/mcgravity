@@ -6,7 +6,7 @@
 
 ## About
 
-McGravity is a tool that connects multiple MCP (Machine Communication Protocol) servers into one unified service. It lets you reuse the same MCP server and scale underlying MCP server connections almost infinitely.
+McGravity is a tool that connects multiple MCP (Model Context Protocol) servers into one unified service. It lets you reuse the same MCP server and scale underlying MCP server connections almost infinitely.
 
 The current version works as a basic CLI tool, but McGravity will grow to become a full-featured proxy for MCP servers - like Nginx but for modern Gen AI tools and servers.
 

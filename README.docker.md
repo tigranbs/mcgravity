@@ -2,7 +2,7 @@
 
 ## Overview
 
-McGravity is a tool that connects multiple MCP (Machine Communication Protocol) servers into one unified service. This document explains how to use McGravity with Docker.
+McGravity is a tool that connects multiple MCP (Model Context Protocol) servers into one unified service. This document explains how to use McGravity with Docker.
 
 ## Using the Docker Image
 
