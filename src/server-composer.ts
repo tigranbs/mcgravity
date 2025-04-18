@@ -12,7 +12,13 @@ import { jsonSchemaToZod } from './utils/schema-converter';
 
 export class McpServerComposer {
   public readonly server: McpServer;
-  private readonly targetClients: Map<string, Client> = new Map();
+  private readonly targetClients: Map<
+    string,
+    {
+      clientInfo: Implementation;
+      url: URL;
+    }
+  > = new Map();
 
   constructor(serverInfo: Implementation) {
     this.server = new McpServer(serverInfo);
@@ -24,8 +30,9 @@ export class McpServerComposer {
     skipRegister = false
   ): Promise<void> {
     const targetClient = new Client(clientInfo);
+    const targetTransport = new SSEClientTransport(targetServerUrl);
     try {
-      await targetClient.connect(new SSEClientTransport(targetServerUrl));
+      await targetClient.connect(targetTransport);
     } catch (error) {
       console.error(
         `Failed to connect to ${targetServerUrl} -> ${clientInfo.name}`,
@@ -44,10 +51,7 @@ export class McpServerComposer {
 
     const name = targetServerUrl.toString();
 
-    targetClient.onclose = this.handleTargetServerClose(name, targetServerUrl, clientInfo);
-    targetClient.onerror = this.handleTargetServerClose(name, targetServerUrl, clientInfo);
-
-    this.targetClients.set(name, targetClient);
+    this.targetClients.set(name, { clientInfo, url: targetServerUrl });
 
     if (skipRegister) {
       console.log(`Skipping capabilities registration for ${name}`);
@@ -68,6 +72,7 @@ export class McpServerComposer {
     console.log(`Registered ${prompts.prompts.length} prompts for ${name}`);
 
     console.log(`Capabilities registration for ${name} completed`);
+    targetClient.close(); // We don't have to keep the client open
   }
 
   listTargetClients() {
@@ -83,7 +88,6 @@ export class McpServerComposer {
   async disconnect(clientName: string) {
     const client = this.targetClients.get(clientName);
     if (client) {
-      await client.close();
       this.targetClients.delete(clientName);
     }
   }
@@ -92,15 +96,20 @@ export class McpServerComposer {
     for (const tool of tools) {
       const schemaObject = jsonSchemaToZod(tool.inputSchema);
       this.server.tool(tool.name, tool.description ?? '', schemaObject, async (args) => {
-        const client = this.targetClients.get(name);
-        if (!client) {
+        const clientItem = this.targetClients.get(name);
+        if (!clientItem) {
           throw new Error(`Client for ${name} not found`);
         }
+
+        const client = new Client(clientItem.clientInfo);
+        await client.connect(new SSEClientTransport(clientItem.url));
+        console.log(`Calling tool ${tool.name} with args ${JSON.stringify(args)}`);
 
         const result = await client.callTool({
           name: tool.name,
           arguments: args,
         });
+        await client.close();
         return result as CallToolResult;
       });
     }
@@ -113,15 +122,20 @@ export class McpServerComposer {
         resource.uri,
         { description: resource.description, mimeType: resource.mimeType },
         async (uri) => {
-          const client = this.targetClients.get(name);
-          if (!client) {
+          const clientItem = this.targetClients.get(name);
+          if (!clientItem) {
             throw new Error(`Client for ${name} not found`);
           }
 
-          return await client.readResource({
+          const client = new Client(clientItem.clientInfo);
+          await client.connect(new SSEClientTransport(clientItem.url));
+
+          const result = await client.readResource({
             uri: uri.toString(),
             _meta: resource._meta as ResourceMetadata,
           });
+          await client.close();
+          return result;
         }
       );
     }
@@ -131,15 +145,20 @@ export class McpServerComposer {
     for (const prompt of prompts) {
       const argsSchema = jsonSchemaToZod(prompt.arguments);
       this.server.prompt(prompt.name, prompt.description ?? '', argsSchema, async (args) => {
-        const client = this.targetClients.get(name);
-        if (!client) {
+        const clientItem = this.targetClients.get(name);
+        if (!clientItem) {
           throw new Error(`Client for ${name} not found`);
         }
 
-        return await client.getPrompt({
+        const client = new Client(clientItem.clientInfo);
+        await client.connect(new SSEClientTransport(clientItem.url));
+
+        const result = await client.getPrompt({
           name: prompt.name,
           arguments: args,
         });
+        await client.close();
+        return result;
       });
     }
   }
