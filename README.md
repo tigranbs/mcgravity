@@ -1,4 +1,5 @@
 # McGravity
+[![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/tigranbs/mcgravity)](https://archestra.ai/mcp-catalog/tigranbs__mcgravity)
 
 <div align="center">
   <img src="./assets/thumbnail.png" alt="McGravity Thumbnail" width="400">
