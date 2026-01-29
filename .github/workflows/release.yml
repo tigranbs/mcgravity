@@ -407,24 +407,27 @@ jobs:
             tar -xzf "$pkg" -C "$WORKDIR"
 
             # Patch binary-install.js to chmod binary after extraction
+            # Insert patch BEFORE "module.exports.Package = Package;" so Package is still in scope
             BINARY_INSTALL="$WORKDIR/package/binary-install.js"
             if [ -f "$BINARY_INSTALL" ]; then
-              cat >> "$BINARY_INSTALL" << 'CHMOD_PATCH'
-
-          // Patch: Set executable permissions after binary extraction
-          const _originalInstall = Binary.prototype.install;
-          Binary.prototype.install = async function(proxy, suppressLogs) {
-            await _originalInstall.call(this, proxy, suppressLogs);
-            const fs = require('fs');
-            const path = require('path');
-            try {
-              const binPath = path.join(this.installDirectory, this.binaryName);
-              if (fs.existsSync(binPath)) {
-                fs.chmodSync(binPath, 0o755);
-              }
-            } catch (e) { /* ignore chmod errors on Windows */ }
+              sed -i '/^module\.exports\.Package = Package;$/i\
+          // Patch: Set executable permissions after binary extraction\
+          const _originalInstall = Package.prototype.install;\
+          Package.prototype.install = function(fetchOptions, suppressLogs) {\
+            return _originalInstall.call(this, fetchOptions, suppressLogs).then(() => {\
+              const fs = require("fs");\
+              const path = require("path");\
+              try {\
+                for (const binaryName in this.binaries) {\
+                  const binPath = path.join(this.installDirectory, this.binaries[binaryName]);\
+                  if (fs.existsSync(binPath)) {\
+                    fs.chmodSync(binPath, 0o755);\
+                  }\
+                }\
+              } catch (e) { /* ignore chmod errors on Windows */ }\
+            });\
           };
-          CHMOD_PATCH
+          ' "$BINARY_INSTALL"
             fi
 
             # Repack the tarball
