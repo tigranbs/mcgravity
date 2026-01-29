@@ -1,7 +1,7 @@
 # McGravity
 
 <div align="center">
-  <img src="./assets/thumbnail.png" alt="McGravity Thumbnail" width="400">
+  <img src="https://raw.githubusercontent.com/tigranbs/mcgravity/main/assets/thumbnail.png" alt="McGravity Thumbnail" width="400">
 </div>
 
 **Fast, opinionated TUI for AI-assisted coding.**
