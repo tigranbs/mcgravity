@@ -393,6 +393,46 @@ jobs:
           pattern: artifacts-*
           path: npm/
           merge-multiple: true
+
+      # Patch npm packages to fix executable permissions
+      # cargo-dist's binary-install.js does NOT set executable permissions after extracting binaries.
+      # GitHub Actions artifact upload/download loses Unix permissions, so we patch the installer.
+      - name: Patch npm packages for executable permissions
+        run: |
+          for pkg in npm/*-npm-package.tar.gz; do
+            [ -f "$pkg" ] || continue
+            echo "Patching $pkg for executable permissions..."
+
+            WORKDIR=$(mktemp -d)
+            tar -xzf "$pkg" -C "$WORKDIR"
+
+            # Patch binary-install.js to chmod binary after extraction
+            BINARY_INSTALL="$WORKDIR/package/binary-install.js"
+            if [ -f "$BINARY_INSTALL" ]; then
+              cat >> "$BINARY_INSTALL" << 'CHMOD_PATCH'
+
+          // Patch: Set executable permissions after binary extraction
+          const _originalInstall = Binary.prototype.install;
+          Binary.prototype.install = async function(proxy, suppressLogs) {
+            await _originalInstall.call(this, proxy, suppressLogs);
+            const fs = require('fs');
+            const path = require('path');
+            try {
+              const binPath = path.join(this.installDirectory, this.binaryName);
+              if (fs.existsSync(binPath)) {
+                fs.chmodSync(binPath, 0o755);
+              }
+            } catch (e) { /* ignore chmod errors on Windows */ }
+          };
+          CHMOD_PATCH
+            fi
+
+            # Repack the tarball
+            rm "$pkg"
+            tar -czf "$pkg" -C "$WORKDIR" package
+            rm -rf "$WORKDIR"
+          done
+
       - uses: actions/setup-node@v4
         with:
           node-version: "20.x"
