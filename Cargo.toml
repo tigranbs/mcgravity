@@ -2,10 +2,10 @@
 name = "mcgravity"
 version = "0.1.1"
 edition = "2024"
-repository = "https://github.com/tigranbs/mcgravity-2"
+repository = "https://github.com/tigranbs/mcgravity"
 description = "TUI interface for orchestrating AI-assisted coding tools"
 license = "MIT"
-homepage = "https://github.com/tigranbs/mcgravity-2"
+homepage = "https://github.com/tigranbs/mcgravity"
 
 [dependencies]
 ratatui = "0.30"
