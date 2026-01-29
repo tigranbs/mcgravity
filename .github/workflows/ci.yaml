@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+          tool-cache: false
+
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: swatinem/rust-cache@v2
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake pkg-config libssl-dev ca-certificates \
+            libva-dev libdrm-dev libglib2.0-dev libgbm-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcomposite-dev libxdamage-dev libxfixes-dev
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy lint
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test with all features
+        run: |
+          echo "::group::Building and testing with all features"
+          cargo build --locked --all-features
+          cargo test --locked --all-features
+          echo "::endgroup::"

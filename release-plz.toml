@@ -1,0 +1,12 @@
+[workspace]
+# Disable git release creation - cargo-dist handles this
+git_release_enable = false
+
+# Enable changelog generation
+changelog_update = true
+
+# Tag format to match cargo-dist expectations
+git_tag_name = "v{{ version }}"
+
+# Release always when version changes
+release_always = true
