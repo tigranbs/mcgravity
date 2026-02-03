@@ -135,13 +135,13 @@ impl App {
     /// Renders an error line for an unavailable CLI.
     ///
     /// This is used by both the initial setup modal and the settings panel
-    /// to display a consistent error message when a CLI tool is not found.
+    /// to display a consistent error message when a CLI tool is unavailable.
     pub(crate) fn render_unavailable_error(&self, model: Model) -> Line<'static> {
         let command = model.command();
         Line::from(vec![
             Span::raw("    "), // Indent to align with model field
             Span::styled(
-                format!("⚠ `{command}` command not found in PATH"),
+                format!("⚠ `{command}` is not available or not executable"),
                 self.theme.error_style(),
             ),
         ])
