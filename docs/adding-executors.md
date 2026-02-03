@@ -145,10 +145,10 @@ pub trait AiCliExecutor: Send + Sync {
     /// Returns the CLI command name used by this executor.
     fn command(&self) -> &'static str;
 
-    /// Checks if this executor's CLI tool is available in PATH.
-    /// Default implementation uses `which <command>`.
-    async fn is_available(&self) -> bool {
-        check_cli_available(self.command()).await.unwrap_or(false)
+    /// Checks if this executor's CLI tool is available.
+    /// Default implementation uses the shell-aware resolution strategy.
+    fn is_available(&self) -> bool {
+        check_cli_available(self.command())
     }
 }
 ```
@@ -286,9 +286,9 @@ The CLI resolution follows this priority order:
 | bash  | `~/.bash_profile` or `~/.profile` | `~/.bashrc` | Yes (POSIX) |
 | zsh   | `~/.zprofile` | `~/.zshrc` | Yes (POSIX) |
 | sh    | `~/.profile` | - | Yes (POSIX) |
-| fish  | `~/.config/fish/config.fish` | Same | `type -p` instead |
+| fish  | `~/.config/fish/config.fish` | Same | Yes (via `-v` alias) |
 
-**Note**: For `fish` shell, use `type -p <cmd>` instead of `command -v` since fish doesn't support POSIX `command -v` syntax.
+**Note**: Fish shell supports `command -v` as an alias for `command --search`, which prints the path to the external command. The implementation uses `command -v` universally across all shells.
 
 ### Executability Verification
 

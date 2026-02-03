@@ -32,7 +32,7 @@
 //!
 //! See `docs/adding-executors.md` for the complete resolution strategy documentation.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Result of resolving a CLI command.
@@ -215,7 +215,7 @@ fn try_path_lookup(command: &str) -> Option<CommandResolution> {
 
 /// Checks if a path points to an executable file.
 #[cfg(unix)]
-fn is_executable(path: &PathBuf) -> bool {
+fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
 
     match std::fs::metadata(path) {
@@ -228,7 +228,7 @@ fn is_executable(path: &PathBuf) -> bool {
 }
 
 #[cfg(windows)]
-fn is_executable(path: &PathBuf) -> bool {
+fn is_executable(path: &Path) -> bool {
     // On Windows, check if the file exists and has an executable extension
     if !path.is_file() {
         return false;

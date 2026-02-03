@@ -138,8 +138,8 @@ pub trait AiCliExecutor: Send + Sync {
     ///
     /// Uses the shell-aware resolution strategy to detect commands available
     /// via PATH, shell aliases, functions, or shell profile modifications.
-    async fn is_available(&self) -> bool {
-        check_cli_available(self.command()).unwrap_or(false)
+    fn is_available(&self) -> bool {
+        check_cli_available(self.command())
     }
 }
 
@@ -501,15 +501,10 @@ async fn run_claude_cli_with_output(
 ///
 /// # Returns
 ///
-/// `Ok(true)` if the command is available, `Ok(false)` otherwise.
-///
-/// # Errors
-///
-/// This function does not return errors; resolution failures result in `Ok(false)`.
-pub fn check_cli_available(name: &str) -> Result<bool> {
-    // Use the synchronous resolver from cli_check to ensure consistent
-    // resolution logic between sync and async code paths.
-    Ok(crate::core::cli_check::resolve_cli_command(name).is_available())
+/// `true` if the command is available, `false` otherwise.
+#[must_use]
+pub fn check_cli_available(name: &str) -> bool {
+    crate::core::cli_check::resolve_cli_command(name).is_available()
 }
 
 /// Waits for a shutdown signal on the watch channel.
@@ -925,20 +920,18 @@ mod tests {
         use super::*;
 
         /// Tests `check_cli_available` with a command that should exist (sh).
-        #[tokio::test]
-        async fn check_cli_available_finds_sh() -> anyhow::Result<()> {
+        #[test]
+        fn check_cli_available_finds_sh() {
             // 'sh' should exist on all Unix systems
-            let result = check_cli_available("sh")?;
+            let result = check_cli_available("sh");
             assert!(result);
-            Ok(())
         }
 
         /// Tests `check_cli_available` with a non-existent command.
-        #[tokio::test]
-        async fn check_cli_available_nonexistent_returns_false() -> anyhow::Result<()> {
-            let result = check_cli_available("this_command_definitely_does_not_exist_12345")?;
+        #[test]
+        fn check_cli_available_nonexistent_returns_false() {
+            let result = check_cli_available("this_command_definitely_does_not_exist_12345");
             assert!(!result);
-            Ok(())
         }
 
         /// Tests `wait_for_shutdown` returns immediately when already signaled.

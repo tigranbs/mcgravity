@@ -927,7 +927,7 @@ mod tests {
             "mock"
         }
 
-        async fn is_available(&self) -> bool {
+        fn is_available(&self) -> bool {
             true
         }
     }
@@ -989,7 +989,7 @@ mod tests {
             "mock"
         }
 
-        async fn is_available(&self) -> bool {
+        fn is_available(&self) -> bool {
             true
         }
     }
