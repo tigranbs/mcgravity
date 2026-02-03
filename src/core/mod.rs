@@ -9,7 +9,10 @@ pub mod retry;
 pub mod runner;
 pub mod task_utils;
 
-pub use cli_check::{ModelAvailability, check_cli_in_path};
+pub use cli_check::{
+    CommandResolution, ModelAvailability, check_cli_in_path, is_safe_command_name,
+    resolve_cli_command,
+};
 pub use commands::{
     ClearCommand, CommandContext, CommandRegistry, CommandResult, ExitCommand, SettingsCommand,
     SlashCommand,

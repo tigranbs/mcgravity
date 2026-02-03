@@ -2,6 +2,17 @@
 //!
 //! Provides a trait-based abstraction for executing different AI CLI tools
 //! (Codex, Claude, Gemini, etc.) with a unified interface.
+//!
+//! # Command Resolution
+//!
+//! This module uses the shell-aware resolution strategy from [`crate::core::cli_check`]:
+//! 1. Fast PATH lookup via `which`/`where` with executability verification
+//! 2. Shell-based resolution via `$SHELL -l -i -c "command -v <cmd>"` (Unix only)
+//!
+//! This ensures that commands installed via macOS aliases, shell functions, or
+//! PATH modifications in shell profiles are properly detected and executed.
+//!
+//! See `docs/adding-executors.md` for the complete resolution strategy documentation.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -123,9 +134,12 @@ pub trait AiCliExecutor: Send + Sync {
     /// Returns the CLI command name used by this executor.
     fn command(&self) -> &'static str;
 
-    /// Checks if this executor's CLI tool is available in PATH.
+    /// Checks if this executor's CLI tool is available.
+    ///
+    /// Uses the shell-aware resolution strategy to detect commands available
+    /// via PATH, shell aliases, functions, or shell profile modifications.
     async fn is_available(&self) -> bool {
-        check_cli_available(self.command()).await.unwrap_or(false)
+        check_cli_available(self.command()).unwrap_or(false)
     }
 }
 
@@ -242,10 +256,69 @@ struct SpawnedProcess {
 
 /// Spawns a CLI process with stdout and stderr captured.
 ///
+/// Uses the shell-aware resolution strategy to find the command:
+/// 1. Resolves the command using [`crate::core::cli_check::resolve_cli_command`]
+/// 2. For `PathExecutable`: spawns directly using the resolved path
+/// 3. For shell-resolved commands (alias/function/builtin): spawns via shell wrapper
+/// 4. For `NotFound`: returns a contextual error
+///
 /// On Linux, configures the child to be killed when the parent dies via `PR_SET_PDEATHSIG`.
+///
+/// # Arguments
+///
+/// * `command` - The command name to execute (e.g., "claude", "codex")
+/// * `args` - Arguments to pass to the command
+///
+/// # Errors
+///
+/// Returns an error if the command cannot be resolved or if spawning fails.
 fn spawn_cli_process(command: &str, args: &[&str]) -> Result<SpawnedProcess> {
-    let mut cmd = Command::new(command);
-    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    use crate::core::cli_check::{CommandResolution, resolve_cli_command};
+
+    let resolution = resolve_cli_command(command);
+
+    let mut cmd = match &resolution {
+        CommandResolution::PathExecutable(path) => {
+            // Direct execution with resolved path
+            let mut c = Command::new(path);
+            c.args(args);
+            c
+        }
+        CommandResolution::ShellAlias(_)
+        | CommandResolution::ShellFunction(_)
+        | CommandResolution::ShellBuiltin => {
+            // Shell wrapper required
+            #[cfg(unix)]
+            {
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+
+                // Build the command string with properly escaped args
+                let escaped_args: Vec<String> =
+                    args.iter().map(|arg| shell_escape_arg(arg)).collect();
+                let full_command = format!("{} {}", command, escaped_args.join(" "));
+
+                let mut c = Command::new(&shell);
+                c.args(["-l", "-i", "-c", &full_command]);
+                c
+            }
+            #[cfg(windows)]
+            {
+                // On Windows, shell-resolved commands are less common
+                // Fall back to direct execution attempt
+                let mut c = Command::new(command);
+                c.args(args);
+                c
+            }
+        }
+        CommandResolution::NotFound => {
+            anyhow::bail!(
+                "CLI command '{command}' not found. Ensure it is installed and available in PATH, \
+                or via shell alias/function. Run `which {command}` or check your shell profile."
+            );
+        }
+    };
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     // On Linux, set up the child to be killed when the parent dies.
     // This ensures cleanup even if the parent is killed with SIGKILL.
@@ -272,6 +345,23 @@ fn spawn_cli_process(command: &str, args: &[&str]) -> Result<SpawnedProcess> {
         stdout,
         stderr,
     })
+}
+
+/// Escapes a shell argument for safe inclusion in a shell command string.
+///
+/// Uses single quotes for most cases, with proper handling of embedded single quotes.
+#[cfg(unix)]
+fn shell_escape_arg(arg: &str) -> String {
+    // If the arg contains no special characters, return as-is
+    if arg
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/')
+    {
+        return arg.to_string();
+    }
+
+    // Use single quotes, escaping embedded single quotes as '\''
+    format!("'{}'", arg.replace('\'', "'\\''"))
 }
 
 /// Runs a CLI process with custom stdout processing.
@@ -396,23 +486,30 @@ async fn run_claude_cli_with_output(
     .await
 }
 
-/// Checks if a CLI tool is available in PATH.
+/// Checks if a CLI tool is available using the shell-aware resolution strategy.
+///
+/// This function delegates to [`crate::core::cli_check::resolve_cli_command`]
+/// which implements the resolution algorithm documented in `docs/adding-executors.md`:
+/// 1. Fast PATH lookup via `which`/`where` with executability verification
+/// 2. Shell-based resolution via `$SHELL -l -i -c "command -v <cmd>"` (Unix only)
+///
+/// Returns `false` for non-executable files in PATH.
+///
+/// # Arguments
+///
+/// * `name` - The command name to check (e.g., "codex", "claude", "gemini")
+///
+/// # Returns
+///
+/// `Ok(true)` if the command is available, `Ok(false)` otherwise.
 ///
 /// # Errors
 ///
-/// Returns an error if the check fails.
-pub async fn check_cli_available(name: &str) -> Result<bool> {
-    let result = Command::new("which")
-        .arg(name)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .await;
-
-    match result {
-        Ok(output) => Ok(output.status.success()),
-        Err(_) => Ok(false),
-    }
+/// This function does not return errors; resolution failures result in `Ok(false)`.
+pub fn check_cli_available(name: &str) -> Result<bool> {
+    // Use the synchronous resolver from cli_check to ensure consistent
+    // resolution logic between sync and async code paths.
+    Ok(crate::core::cli_check::resolve_cli_command(name).is_available())
 }
 
 /// Waits for a shutdown signal on the watch channel.
@@ -831,7 +928,7 @@ mod tests {
         #[tokio::test]
         async fn check_cli_available_finds_sh() -> anyhow::Result<()> {
             // 'sh' should exist on all Unix systems
-            let result = check_cli_available("sh").await?;
+            let result = check_cli_available("sh")?;
             assert!(result);
             Ok(())
         }
@@ -839,8 +936,7 @@ mod tests {
         /// Tests `check_cli_available` with a non-existent command.
         #[tokio::test]
         async fn check_cli_available_nonexistent_returns_false() -> anyhow::Result<()> {
-            let result =
-                check_cli_available("this_command_definitely_does_not_exist_12345").await?;
+            let result = check_cli_available("this_command_definitely_does_not_exist_12345")?;
             assert!(!result);
             Ok(())
         }
