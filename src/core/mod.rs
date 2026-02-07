@@ -19,7 +19,7 @@ pub use commands::{
 };
 pub use executor::{AiCliExecutor, ClaudeExecutor, CliOutput, CodexExecutor, GeminiExecutor};
 pub use flow::{FlowPhase, FlowState};
-pub use prompts::{wrap_for_execution, wrap_for_planning};
+pub use prompts::{wrap_for_execution, wrap_for_planning, wrap_for_task_summary};
 pub use retry::RetryConfig;
 pub use runner::run_flow;
 

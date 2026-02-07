@@ -6,7 +6,6 @@
 
 use super::helpers::*;
 use crate::app::state::{AppMode, AtToken};
-use crate::core::prompts::wrap_for_execution;
 use crate::file_search::FileMatch;
 use crate::fs::TASK_FILE;
 use crate::tui::widgets::PopupState;
@@ -22,94 +21,12 @@ use tempfile::TempDir;
 // =============================================================================
 //
 // These tests verify that the complete flow works correctly from task submission
-// through execution to session reset, with completed tasks context from task.md
-// but WITHOUT the verification step.
-
-/// Test that `wrap_for_execution()` output contains task content and `COMPLETED_TASKS` section.
-///
-/// This verifies that the execution phase receives completed task summaries as context.
-#[test]
-fn test_wrap_for_execution_contains_completed_tasks_context() {
-    let task = "# Task 005: Implement feature X\n\n## Objective\nAdd feature X";
-    let completed_tasks =
-        "- task-001.md: Setup database\n- task-002.md: Create models\n- task-003.md: Add API";
-
-    let wrapped = wrap_for_execution(task, completed_tasks);
-
-    // Verify the output contains the COMPLETED_TASKS section
-    assert!(
-        wrapped.contains("<COMPLETED_TASKS>"),
-        "Execution input should contain COMPLETED_TASKS opening tag"
-    );
-    assert!(
-        wrapped.contains("</COMPLETED_TASKS>"),
-        "Execution input should contain COMPLETED_TASKS closing tag"
-    );
-
-    // Verify the completed tasks content is included
-    assert!(
-        wrapped.contains("task-001.md"),
-        "Execution input should contain completed task references"
-    );
-    assert!(
-        wrapped.contains("task-002.md"),
-        "Execution input should contain completed task references"
-    );
-    assert!(
-        wrapped.contains("task-003.md"),
-        "Execution input should contain completed task references"
-    );
-
-    // Verify the task content is included
-    assert!(
-        wrapped.contains("# Task 005"),
-        "Execution input should contain the task content"
-    );
-    assert!(
-        wrapped.contains("Implement feature X"),
-        "Execution input should contain the task title"
-    );
-}
-
-/// Test that `wrap_for_execution()` does NOT contain verification instructions.
-///
-/// This is the critical test to ensure Tasks 021-023 changes are maintained:
-/// execution phase should not have a step to verify if task is already done.
-#[test]
-fn test_wrap_for_execution_does_not_contain_verification_step() {
-    let task = "# Task 005: Implement feature X";
-    let completed_tasks = "- task-001.md: Some completed task";
-
-    let wrapped = wrap_for_execution(task, completed_tasks);
-
-    // Should NOT contain verification step instructions
-    assert!(
-        !wrapped.contains("Check Completed Tasks"),
-        "Execution input should NOT contain 'Check Completed Tasks' verification step"
-    );
-    assert!(
-        !wrapped.contains("skip this task"),
-        "Execution input should NOT contain 'skip this task' instruction"
-    );
-    assert!(
-        !wrapped.contains("already been completed"),
-        "Execution input should NOT contain 'already been completed' language"
-    );
-    assert!(
-        !wrapped.contains("task has been completed"),
-        "Execution input should NOT contain 'task has been completed' language"
-    );
-    assert!(
-        !wrapped.contains("Step 0"),
-        "Execution input should NOT have a Step 0 (verification step)"
-    );
-
-    // Should have step numbers starting from 1, not 0
-    assert!(
-        wrapped.contains("Step 1"),
-        "Execution input should have Step 1 (not Step 0)"
-    );
-}
+// through execution to session reset (mode transitions, task/session reset, and
+// flow event handling).
+//
+// Prompt-contract assertions (wrap_for_execution shape, COMPLETED_TASKS inline
+// summary semantics, verification step absence) live in `src/core/prompts.rs`
+// tests per the project guideline "Test core logic independently from TUI layer".
 
 /// Test that Finished mode is reached when flow completes successfully (`NoTodoFiles` phase).
 ///
@@ -357,7 +274,7 @@ async fn test_complete_flow_without_verification_integration() -> Result<()> {
         "task.md should be created"
     );
 
-    // Step 2: Simulate planning phase completed - create summary context
+    // Step 2: Simulate planning phase completed - create done context
     // (legacy done files are migrated to task.md COMPLETED_TASKS block on first cycle)
     let done_dir = std::path::Path::new(crate::fs::DONE_DIR);
     fs::create_dir_all(done_dir)?;
@@ -366,28 +283,10 @@ async fn test_complete_flow_without_verification_integration() -> Result<()> {
         "# Task 001: Setup database\n\nCompleted.",
     )?;
 
-    // Step 3: Verify execution prompt would receive completed tasks context
-    let task_content = "# Task 002: Implement feature X\n\n## Objective\nImplement the feature";
-    let completed_summary = "- task-001.md: Setup database";
-    let execution_prompt = wrap_for_execution(task_content, completed_summary);
+    // Note: Prompt-contract assertions (inline summary semantics, verification step
+    // absence, done-file path rejection) are covered in `src/core/prompts.rs` tests.
 
-    // Verify completed tasks context is in the prompt
-    assert!(
-        execution_prompt.contains("task-001.md"),
-        "Execution prompt should contain completed tasks context"
-    );
-
-    // Verify NO verification step is in the prompt
-    assert!(
-        !execution_prompt.contains("Check Completed Tasks"),
-        "Execution prompt should NOT have verification step"
-    );
-    assert!(
-        !execution_prompt.contains("skip this task"),
-        "Execution prompt should NOT have skip instruction"
-    );
-
-    // Step 4: Simulate flow completion
+    // Step 3: Simulate flow completion
     app.flow.phase = crate::core::FlowPhase::Completed;
     app.event_tx
         .send(crate::app::state::FlowEvent::Done)
@@ -426,65 +325,6 @@ async fn test_complete_flow_without_verification_integration() -> Result<()> {
         "Text input should be empty for new session"
     );
     Ok(())
-}
-
-/// Test that execution prefix references completed tasks as context (not for verification).
-#[test]
-fn test_execution_prefix_completed_tasks_is_context_only() {
-    use crate::core::prompts::EXECUTION_PREFIX_TEMPLATE as EXECUTION_PREFIX;
-
-    // Should reference COMPLETED_TASKS
-    assert!(
-        EXECUTION_PREFIX.contains("COMPLETED_TASKS"),
-        "EXECUTION_PREFIX should reference COMPLETED_TASKS"
-    );
-
-    // Should indicate it's for reference only
-    assert!(
-        EXECUTION_PREFIX.contains("for reference only")
-            || EXECUTION_PREFIX.contains("previously completed"),
-        "EXECUTION_PREFIX should indicate completed tasks are for reference"
-    );
-
-    // Should NOT have verification instructions
-    assert!(
-        !EXECUTION_PREFIX.contains("Check Completed Tasks"),
-        "EXECUTION_PREFIX should NOT have 'Check Completed Tasks' step"
-    );
-    assert!(
-        !EXECUTION_PREFIX.contains("already been completed"),
-        "EXECUTION_PREFIX should NOT have 'already been completed' language"
-    );
-}
-
-/// Test that execution prefix has correct step ordering (no Step 0).
-#[test]
-fn test_execution_prefix_step_ordering() {
-    use crate::core::prompts::EXECUTION_PREFIX_TEMPLATE as EXECUTION_PREFIX;
-
-    // Should NOT have Step 0
-    assert!(
-        !EXECUTION_PREFIX.contains("Step 0"),
-        "EXECUTION_PREFIX should NOT have Step 0"
-    );
-
-    // Should have steps 1-4 in order
-    let step1_pos = EXECUTION_PREFIX
-        .find("Step 1")
-        .expect("Step 1 should exist");
-    let step2_pos = EXECUTION_PREFIX
-        .find("Step 2")
-        .expect("Step 2 should exist");
-    let step3_pos = EXECUTION_PREFIX
-        .find("Step 3")
-        .expect("Step 3 should exist");
-    let step4_pos = EXECUTION_PREFIX
-        .find("Step 4")
-        .expect("Step 4 should exist");
-
-    assert!(step1_pos < step2_pos, "Step 1 should come before Step 2");
-    assert!(step2_pos < step3_pos, "Step 2 should come before Step 3");
-    assert!(step3_pos < step4_pos, "Step 3 should come before Step 4");
 }
 
 // =============================================================================
@@ -914,6 +754,233 @@ fn integration_paste_multiline_code() {
 
     // Flow should NOT have started
     assert!(!app.is_running);
+}
+
+// =============================================================================
+// TaskTextUpdated Flow Event Tests (Task 003)
+// =============================================================================
+//
+// These tests verify that FlowEvent::TaskTextUpdated updates only the
+// flow-owned read-only task text (flow.input_text) during execution,
+// without overwriting the editable text_input.textarea content.
+
+/// Test that `TaskTextUpdated` updates `flow.input_text` without touching `text_input.textarea`.
+///
+/// When the flow is running, `TaskTextUpdated` events arrive to keep the read-only
+/// task panel synchronized with on-disk state. The editable textarea must not be clobbered.
+#[tokio::test]
+#[serial]
+async fn test_process_events_task_text_updated_only_updates_flow_input() -> Result<()> {
+    let _guard = CwdGuard::new()?;
+    let temp_dir = TempDir::new()?;
+    std::env::set_current_dir(temp_dir.path())?;
+
+    let mut app = crate::app::App::new(None)?;
+
+    // Set up editable textarea with user content
+    app.text_input
+        .set_lines(vec!["User draft task".to_string()]);
+
+    // Set running state (simulates flow in progress)
+    app.is_running = true;
+
+    // Send TaskTextUpdated event (simulates summary migration updating task.md)
+    let updated_text =
+        "Updated task with\n<COMPLETED_TASKS>\n- Task 001 summary\n</COMPLETED_TASKS>".to_string();
+    app.event_tx
+        .send(crate::app::state::FlowEvent::TaskTextUpdated(
+            updated_text.clone(),
+        ))
+        .await?;
+
+    // Process events
+    app.process_events();
+
+    // Verify flow.input_text was updated
+    assert_eq!(
+        app.flow.input_text, updated_text,
+        "flow.input_text should be updated by TaskTextUpdated"
+    );
+
+    // Verify text_input.textarea was NOT modified
+    assert_eq!(
+        app.text_input.lines(),
+        vec!["User draft task"],
+        "text_input.textarea should NOT be overwritten by TaskTextUpdated"
+    );
+
+    Ok(())
+}
+
+/// Test that multiple `TaskTextUpdated` events accumulate correctly in `flow.input_text`.
+///
+/// Each update should replace the previous value (last-writer-wins), never affecting
+/// the editable textarea.
+#[tokio::test]
+#[serial]
+async fn test_process_events_multiple_task_text_updates() -> Result<()> {
+    let _guard = CwdGuard::new()?;
+    let temp_dir = TempDir::new()?;
+    std::env::set_current_dir(temp_dir.path())?;
+
+    let mut app = crate::app::App::new(None)?;
+
+    // Set up editable textarea
+    app.text_input
+        .set_lines(vec!["Original user text".to_string()]);
+    app.is_running = true;
+
+    // Send multiple TaskTextUpdated events
+    app.event_tx
+        .send(crate::app::state::FlowEvent::TaskTextUpdated(
+            "First update".to_string(),
+        ))
+        .await?;
+    app.event_tx
+        .send(crate::app::state::FlowEvent::TaskTextUpdated(
+            "Second update".to_string(),
+        ))
+        .await?;
+
+    // Process all events
+    app.process_events();
+
+    // Last update wins
+    assert_eq!(
+        app.flow.input_text, "Second update",
+        "flow.input_text should reflect the last TaskTextUpdated"
+    );
+
+    // Editable textarea still untouched
+    assert_eq!(
+        app.text_input.lines(),
+        vec!["Original user text"],
+        "text_input.textarea should remain unchanged after multiple TaskTextUpdated events"
+    );
+
+    Ok(())
+}
+
+/// Test that `TaskTextUpdated` interleaved with other events preserves state boundaries.
+///
+/// Output events and `TaskTextUpdated` events must not interfere with each other
+/// or with the editable textarea.
+#[tokio::test]
+#[serial]
+async fn test_process_events_task_text_updated_with_output_events() -> Result<()> {
+    let _guard = CwdGuard::new()?;
+    let temp_dir = TempDir::new()?;
+    std::env::set_current_dir(temp_dir.path())?;
+
+    let mut app = crate::app::App::new(None)?;
+
+    app.text_input.set_lines(vec!["User editing".to_string()]);
+    app.is_running = true;
+
+    // Send interleaved events
+    app.event_tx
+        .send(crate::app::state::FlowEvent::Output(
+            crate::tui::widgets::OutputLine::stdout("Planning started..."),
+        ))
+        .await?;
+    app.event_tx
+        .send(crate::app::state::FlowEvent::TaskTextUpdated(
+            "Task with summaries appended".to_string(),
+        ))
+        .await?;
+    app.event_tx
+        .send(crate::app::state::FlowEvent::Output(
+            crate::tui::widgets::OutputLine::stdout("Planning complete."),
+        ))
+        .await?;
+
+    // Process all events
+    app.process_events();
+
+    // Verify flow.input_text updated
+    assert_eq!(
+        app.flow.input_text, "Task with summaries appended",
+        "flow.input_text should be updated"
+    );
+
+    // Verify output was captured
+    assert_eq!(
+        app.flow_ui.output.len(),
+        2,
+        "Both output lines should be captured"
+    );
+
+    // Verify textarea unchanged
+    assert_eq!(
+        app.text_input.lines(),
+        vec!["User editing"],
+        "text_input.textarea should NOT be affected by output or task text events"
+    );
+
+    Ok(())
+}
+
+/// Regression: `TaskTextUpdated` preserves long `<COMPLETED_TASKS>` payload exactly
+/// in `flow.input_text` without truncation or ellipsis insertion.
+///
+/// The event handler must store the text verbatim so the read-only Task Text panel
+/// and subsequent flow phases see the full completed-task context.
+///
+/// This test follows ratatui.mdc "15.1 Split into three concerns" (state/update/view
+/// separation): the app update path is validated independently of rendering.
+#[tokio::test]
+#[serial]
+async fn test_process_events_task_text_updated_preserves_long_completed_summary() -> Result<()> {
+    let _guard = CwdGuard::new()?;
+    let temp_dir = TempDir::new()?;
+    std::env::set_current_dir(temp_dir.path())?;
+
+    let mut app = crate::app::App::new(None)?;
+
+    // Set up editable textarea with user content
+    app.text_input
+        .set_lines(vec!["User draft task".to_string()]);
+    app.is_running = true;
+
+    // Build a long completed-tasks payload (well over 100 chars to catch premature truncation)
+    let long_summary = "A".repeat(400);
+    let long_task_text =
+        format!("Task description\n\n<COMPLETED_TASKS>\n- {long_summary}\n</COMPLETED_TASKS>\n");
+
+    // Send TaskTextUpdated with the long payload
+    app.event_tx
+        .send(crate::app::state::FlowEvent::TaskTextUpdated(
+            long_task_text.clone(),
+        ))
+        .await?;
+
+    // Process events
+    app.process_events();
+
+    // Verify flow.input_text is preserved exactly (no truncation, no ellipsis)
+    assert_eq!(
+        app.flow.input_text, long_task_text,
+        "flow.input_text must preserve the full TaskTextUpdated payload without truncation"
+    );
+
+    // The long summary must not have been truncated with "..."
+    assert!(
+        !app.flow.input_text.ends_with("..."),
+        "flow.input_text must not end with premature truncation ellipsis"
+    );
+    assert!(
+        app.flow.input_text.contains(&long_summary),
+        "flow.input_text must contain the full long summary entry"
+    );
+
+    // Verify text_input.textarea was NOT modified
+    assert_eq!(
+        app.text_input.lines(),
+        vec!["User draft task"],
+        "text_input.textarea should NOT be overwritten by TaskTextUpdated"
+    );
+
+    Ok(())
 }
 
 /// Integration test: Paste followed by manual Enter should submit.

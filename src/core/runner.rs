@@ -14,14 +14,23 @@ use std::path::Path;
 
 use crate::app::FlowEvent;
 use crate::core::task_utils::{
-    extract_completed_tasks_summary, summarize_completed_tasks, summarize_task_files,
+    extract_completed_tasks_summary, extract_task_summary_with_max_len, normalize_summary_entry,
+    normalize_task_text_completed_section, summarize_task_files, truncate_summary,
     upsert_completed_task_summary,
 };
 use crate::core::{
     AiCliExecutor, CliOutput, FlowPhase, RetryConfig, wrap_for_execution, wrap_for_planning,
+    wrap_for_task_summary,
 };
 use crate::fs::{McgravityPaths, move_to_done, read_file_content, scan_todo_files};
 use crate::tui::widgets::OutputLine;
+
+/// Maximum length for a completed-task summary entry stored in `<COMPLETED_TASKS>`.
+const MAX_SUMMARY_ENTRY_LENGTH: usize = 500;
+
+/// Maximum bytes of captured CLI output retained for summary prompt payloads.
+/// Output beyond this limit is truncated (live UI forwarding is unaffected).
+const MAX_CAPTURED_OUTPUT_BYTES: usize = 100_000;
 
 async fn stop_if_shutdown(
     shutdown_rx: &watch::Receiver<bool>,
@@ -86,15 +95,24 @@ pub async fn run_flow(
     let mut task_text = input_text.clone();
 
     // On first cycle, check for any legacy done files from a previous run
-    // and migrate their file references into task_text's COMPLETED_TASKS block (one-time migration)
+    // and migrate their content summaries into task_text's COMPLETED_TASKS block (one-time migration)
     let done_files = scan_done_files_phase(&tx, &paths.done_dir()).await?;
     if !done_files.is_empty() {
-        // summarize_completed_tasks returns one file reference per line (e.g., "- .mcgravity/todo/done/task-001.md")
-        let file_references = summarize_completed_tasks(&done_files);
-        for line in file_references.lines() {
-            if line.starts_with("- ") {
-                task_text = upsert_completed_task_summary(&task_text, line);
-            }
+        for done_file in &done_files {
+            let summary_line = if let Ok(content) = read_file_content(done_file).await {
+                // Use the full entry budget so legacy summaries are not
+                // prematurely truncated to 100 chars.
+                let summary = extract_task_summary_with_max_len(&content, MAX_SUMMARY_ENTRY_LENGTH);
+                let entry = format!("- {summary}");
+                truncate_summary(&entry, MAX_SUMMARY_ENTRY_LENGTH)
+            } else {
+                let file_name = done_file
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+                format!("- {file_name}: (content unavailable)")
+            };
+            task_text = upsert_completed_task_summary(&task_text, &summary_line);
         }
         // Persist the migrated task_text
         if let Err(e) = persist_task_text(&task_text, &paths.task_file()).await {
@@ -112,6 +130,24 @@ pub async fn run_flow(
     }
     if stop_if_shutdown(&shutdown_rx, &tx).await {
         return Ok(());
+    }
+
+    // Normalize any legacy path-based entries in the COMPLETED_TASKS block
+    // before planning begins, so the planner never sees absolute paths.
+    let normalized = normalize_task_text_completed_section(&task_text);
+    if normalized != task_text {
+        task_text = normalized;
+        if let Err(e) = persist_task_text(&task_text, &paths.task_file()).await {
+            tx.send(FlowEvent::Output(OutputLine::warning(format!(
+                "Failed to persist normalized task.md: {e}"
+            ))))
+            .await
+            .ok();
+        } else {
+            tx.send(FlowEvent::TaskTextUpdated(task_text.clone()))
+                .await
+                .ok();
+        }
     }
 
     let mut cycle_count = 0u32;
@@ -555,51 +591,55 @@ async fn process_todos_phase(
         if *shutdown_rx.borrow() {
             return Ok(());
         }
-        if let Err(e) = exec_result {
-            tx.send(FlowEvent::Output(OutputLine::error(format!(
-                "Failed on {file_name}: {e}"
-            ))))
-            .await
-            .ok();
-            // Continue to next file instead of failing completely
-            continue;
-        }
+        let captured_output = match exec_result {
+            Ok(output) => output,
+            Err(e) => {
+                tx.send(FlowEvent::Output(OutputLine::error(format!(
+                    "Failed on {file_name}: {e}"
+                ))))
+                .await
+                .ok();
+                // Continue to next file instead of failing completely
+                continue;
+            }
+        };
 
-        // Success: Archive the completed todo file first, then upsert file reference
-        let archived_path =
-            match move_to_done(std::slice::from_ref(file_path), &paths.done_dir()).await {
-                Ok(archived) => {
-                    if let Some(path) = archived.into_iter().next() {
-                        let archived_name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown");
-                        tx.send(FlowEvent::Output(OutputLine::info(format!(
-                            "Archived {file_name} -> {archived_name}"
-                        ))))
-                        .await
-                        .ok();
-                        Some(path)
-                    } else {
-                        None
-                    }
-                }
-                Err(e) => {
-                    tx.send(FlowEvent::Output(OutputLine::warning(format!(
-                        "Failed to archive todo file {file_name}: {e}"
+        // Success: Generate a summary of the completed task
+        let summary_entry = generate_task_summary(
+            &todo_task_content,
+            &captured_output,
+            execution_executor,
+            tx,
+            shutdown_rx,
+        )
+        .await;
+
+        // Archive the completed todo file
+        match move_to_done(std::slice::from_ref(file_path), &paths.done_dir()).await {
+            Ok(archived) => {
+                if let Some(path) = archived.into_iter().next() {
+                    let archived_name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown");
+                    tx.send(FlowEvent::Output(OutputLine::info(format!(
+                        "Archived {file_name} -> {archived_name}"
                     ))))
                     .await
                     .ok();
-                    None
                 }
-            };
+            }
+            Err(e) => {
+                tx.send(FlowEvent::Output(OutputLine::warning(format!(
+                    "Failed to archive todo file {file_name}: {e}"
+                ))))
+                .await
+                .ok();
+            }
+        }
 
-        // Build file reference entry using archived path (or fallback to original path)
-        let reference_path = archived_path.as_ref().unwrap_or(file_path);
-        let reference_line = format!("- {}", reference_path.display());
-
-        // Upsert the file reference into input_task_text
-        *input_task_text = upsert_completed_task_summary(input_task_text, &reference_line);
+        // Upsert the summary entry (not file path) into input_task_text
+        *input_task_text = upsert_completed_task_summary(input_task_text, &summary_entry);
 
         // Update the local completed_tasks_summary for subsequent tasks
         completed_tasks_summary = extract_completed_tasks_summary(input_task_text);
@@ -626,6 +666,97 @@ async fn process_todos_phase(
     }
 
     Ok(())
+}
+
+/// Generates a short summary for a completed task by running the execution executor
+/// with the task-summary prompt.
+///
+/// The summary is capped at `MAX_SUMMARY_ENTRY_LENGTH` characters and formatted as
+/// a list item (prefixed with `"- "`).
+///
+/// Output is consumed concurrently via a spawned receiver task to prevent
+/// backpressure deadlocks when executor output exceeds the channel buffer.
+///
+/// Falls back to a local content-based summary if the executor call fails.
+async fn generate_task_summary(
+    task_content: &str,
+    execution_output: &str,
+    executor: &dyn AiCliExecutor,
+    tx: &mpsc::Sender<FlowEvent>,
+    shutdown_rx: &watch::Receiver<bool>,
+) -> String {
+    tx.send(FlowEvent::Output(OutputLine::running(
+        "Generating task summary...",
+    )))
+    .await
+    .ok();
+
+    let summary_prompt = wrap_for_task_summary(task_content, execution_output);
+
+    // Create a channel to capture the summary output
+    let (output_tx, mut output_rx) = mpsc::channel::<CliOutput>(100);
+
+    // Spawn a receiver task to consume output concurrently, preventing
+    // backpressure deadlocks when output exceeds channel capacity.
+    // Capture is bounded at `MAX_CAPTURED_OUTPUT_BYTES` to avoid unbounded
+    // in-memory accumulation for summary payload construction.
+    let receiver_handle = tokio::spawn(async move {
+        let mut captured = String::new();
+        let mut capture_full = true;
+        while let Some(output) = output_rx.recv().await {
+            match output {
+                CliOutput::Stdout(s) | CliOutput::Stderr(s) => {
+                    if capture_full {
+                        if !captured.is_empty() {
+                            captured.push('\n');
+                        }
+                        captured.push_str(&s);
+                        if captured.len() > MAX_CAPTURED_OUTPUT_BYTES {
+                            captured.truncate(MAX_CAPTURED_OUTPUT_BYTES);
+                            while !captured.is_char_boundary(captured.len()) {
+                                captured.pop();
+                            }
+                            capture_full = false;
+                        }
+                    }
+                    // Always consume from channel to prevent backpressure
+                }
+            }
+        }
+        captured
+    });
+
+    let exec_result = executor
+        .execute(&summary_prompt, output_tx, shutdown_rx.clone())
+        .await;
+
+    // Wait for the receiver task to finish collecting output.
+    // The channel closes when `output_tx` is dropped by the executor,
+    // which causes the receiver loop to exit.
+    let captured_output = receiver_handle.await.unwrap_or_default();
+
+    let raw_summary =
+        if exec_result.is_ok_and(|s| s.success()) && !captured_output.trim().is_empty() {
+            captured_output.trim().to_string()
+        } else {
+            // Fallback: use local extraction with the full entry budget so the
+            // summary is not prematurely truncated to 100 chars.
+            extract_task_summary_with_max_len(task_content, MAX_SUMMARY_ENTRY_LENGTH)
+        };
+
+    // Normalize the summary: strip any path references the model may have included.
+    // If normalization empties the text, fall back to local extraction, then to a
+    // deterministic placeholder to guarantee we never produce a bare/empty list entry.
+    let summary_text = normalize_summary_entry(&raw_summary)
+        .or_else(|| {
+            let fallback =
+                extract_task_summary_with_max_len(task_content, MAX_SUMMARY_ENTRY_LENGTH);
+            normalize_summary_entry(&fallback)
+        })
+        .unwrap_or_else(|| "Completed task".to_string());
+
+    let entry = format!("- {summary_text}");
+    truncate_summary(&entry, MAX_SUMMARY_ENTRY_LENGTH)
 }
 
 /// Persists task text to the task file.
@@ -691,6 +822,9 @@ async fn cleanup_phase(todo_files: &[PathBuf], done_dir: &Path, tx: &mpsc::Sende
 ///
 /// Executes the given input using the provided executor, with automatic
 /// retry on failure. Reports phase changes and logs via the event channel.
+///
+/// On success, returns the captured CLI output text from the successful attempt.
+/// The output is also forwarded to the UI in real-time via `FlowEvent::Output`.
 async fn run_with_retry<F>(
     input_text: &str,
     executor: &dyn AiCliExecutor,
@@ -698,7 +832,7 @@ async fn run_with_retry<F>(
     config: &RetryConfig,
     tx: &mpsc::Sender<FlowEvent>,
     shutdown_rx: &watch::Receiver<bool>,
-) -> Result<()>
+) -> Result<String>
 where
     F: Fn(u32) -> FlowPhase,
 {
@@ -716,15 +850,35 @@ where
         let (output_tx, mut output_rx) = mpsc::channel::<CliOutput>(1000);
         let tx_clone = tx.clone();
 
-        // Spawn a task to forward CLI output to the UI, splitting by newlines
+        // Spawn a task to forward CLI output to the UI and capture bounded text.
+        // Capture is capped at `MAX_CAPTURED_OUTPUT_BYTES` so summary payloads
+        // cannot grow without bound; live UI forwarding is always performed.
         let forward_handle = tokio::spawn(async move {
+            let mut captured = String::new();
+            let mut capture_full = true;
             while let Some(output) = output_rx.recv().await {
                 let (text, is_stderr) = match output {
                     CliOutput::Stdout(s) => (s, false),
                     CliOutput::Stderr(s) => (s, true),
                 };
 
-                // Split by newlines and send each as a separate line
+                // Capture output text (bounded)
+                if capture_full {
+                    if !captured.is_empty() {
+                        captured.push('\n');
+                    }
+                    captured.push_str(&text);
+                    if captured.len() > MAX_CAPTURED_OUTPUT_BYTES {
+                        captured.truncate(MAX_CAPTURED_OUTPUT_BYTES);
+                        // Re-align to a char boundary after truncation
+                        while !captured.is_char_boundary(captured.len()) {
+                            captured.pop();
+                        }
+                        capture_full = false;
+                    }
+                }
+
+                // Split by newlines and send each as a separate line (always)
                 for line_text in text.lines() {
                     let line = if is_stderr {
                         OutputLine::stderr(line_text)
@@ -734,6 +888,7 @@ where
                     let _ = tx_clone.send(FlowEvent::Output(line)).await;
                 }
             }
+            captured
         });
 
         match executor
@@ -741,8 +896,8 @@ where
             .await
         {
             Ok(status) if status.success() => {
-                let _ = forward_handle.await;
-                return Ok(());
+                let captured = forward_handle.await.unwrap_or_default();
+                return Ok(captured);
             }
             Ok(status) => {
                 let _ = forward_handle.await;
@@ -1493,7 +1648,8 @@ mod tests {
             .await;
 
             assert!(result.is_ok());
-            assert_eq!(executor.get_call_count(), 2);
+            // 2 tasks × 2 calls each (execution + summary generation)
+            assert_eq!(executor.get_call_count(), 4);
 
             drop(tx);
             let events = collect_events(rx, 100).await;
@@ -1509,7 +1665,8 @@ mod tests {
             Ok(())
         }
 
-        /// Tests that execution wraps content with execution prompts.
+        /// Tests that execution wraps content with execution prompts and passes
+        /// captured execution output into the summary prompt's `EXECUTION_OUTPUT` section.
         #[tokio::test]
         async fn wraps_content_for_execution() {
             let dir = TempDir::new().unwrap();
@@ -1522,7 +1679,8 @@ mod tests {
 
             let files = vec![file];
 
-            let executor = MockExecutor::new_success("MockExecutor");
+            let executor = MockExecutor::new_success("MockExecutor")
+                .with_output("Mock execution completed successfully");
             let retry_config = RetryConfig::default();
             let (tx, _rx) = mpsc::channel(100);
             let shutdown_rx = create_shutdown_rx();
@@ -1541,7 +1699,9 @@ mod tests {
             .unwrap();
 
             let inputs = executor.get_recorded_inputs();
-            assert_eq!(inputs.len(), 1);
+            // 2 calls: execution + summary generation
+            assert_eq!(inputs.len(), 2);
+            // First call is the execution prompt
             assert!(
                 inputs[0].contains("Original task content"),
                 "Should contain original content"
@@ -1555,6 +1715,21 @@ mod tests {
             assert!(
                 inputs[0].contains("<COMPLETED_TASKS>"),
                 "Should contain COMPLETED_TASKS section"
+            );
+            // Second call is the summary prompt
+            assert!(
+                inputs[1].contains("TASK_SPECIFICATION"),
+                "Second call should be the summary prompt"
+            );
+            // Verify the summary prompt contains non-empty EXECUTION_OUTPUT
+            // from the preceding execution call
+            assert!(
+                inputs[1].contains("<EXECUTION_OUTPUT>"),
+                "Summary prompt should contain EXECUTION_OUTPUT section"
+            );
+            assert!(
+                inputs[1].contains("Mock execution completed successfully"),
+                "Summary prompt should contain the captured execution output"
             );
         }
 
@@ -1577,11 +1752,11 @@ mod tests {
             let (tx, _rx) = mpsc::channel(100);
             let shutdown_rx = create_shutdown_rx();
 
-            // Create task_text with existing completed tasks (file references only)
+            // Create task_text with existing completed task summaries (inline summaries)
             let mut task_text = r"Initial task description
 
 <COMPLETED_TASKS>
-- .mcgravity/todo/done/task-001.md
+- Added retry logic with exponential backoff for CLI executor
 </COMPLETED_TASKS>
 "
             .to_string();
@@ -1599,16 +1774,12 @@ mod tests {
             .unwrap();
 
             let inputs = executor.get_recorded_inputs();
-            assert_eq!(inputs.len(), 1);
-            // Check that completed task file reference is included
+            // 2 calls: execution + summary generation
+            assert_eq!(inputs.len(), 2);
+            // Check that completed task summary is included in the execution prompt
             assert!(
-                inputs[0].contains(".mcgravity/todo/done/task-001.md"),
-                "Should contain completed task file reference in context"
-            );
-            // File references should NOT contain task titles or objectives
-            assert!(
-                !inputs[0].contains("Task 001: Setup Database"),
-                "Should not contain task title - only file reference"
+                inputs[0].contains("Added retry logic with exponential backoff"),
+                "Should contain completed task summary in context"
             );
         }
 
@@ -1740,12 +1911,12 @@ mod tests {
             let (tx, _rx) = mpsc::channel(100);
             let shutdown_rx = create_shutdown_rx();
 
-            // Create task_text with pre-existing completed task file references
+            // Create task_text with pre-existing completed task summaries (inline summaries)
             let mut task_text = r"Initial task description
 
 <COMPLETED_TASKS>
-- .mcgravity/todo/done/task-001.md
-- .mcgravity/todo/done/task-002.md
+- Set up PostgreSQL database with connection pooling and initial schema
+- Created data models and ORM mappings for user and product entities
 </COMPLETED_TASKS>
 "
             .to_string();
@@ -1762,10 +1933,12 @@ mod tests {
             .await
             .unwrap();
 
-            // Verify executor received input with completed task file references
+            // Verify executor received input with completed task summaries
             let inputs = executor.get_recorded_inputs();
-            assert_eq!(inputs.len(), 1);
+            // 2 calls: execution + summary generation
+            assert_eq!(inputs.len(), 2);
 
+            // First call is the execution prompt
             let input = &inputs[0];
 
             // Verify COMPLETED_TASKS section exists
@@ -1778,23 +1951,14 @@ mod tests {
                 "Input should contain COMPLETED_TASKS closing tag"
             );
 
-            // Verify completed task file references are included
+            // Verify completed task summaries are included
             assert!(
-                input.contains(".mcgravity/todo/done/task-001.md"),
-                "Input should reference completed task task-001.md"
+                input.contains("Set up PostgreSQL database"),
+                "Input should contain first completed task summary"
             );
             assert!(
-                input.contains(".mcgravity/todo/done/task-002.md"),
-                "Input should reference completed task task-002.md"
-            );
-            // File references should NOT contain task content (titles, objectives)
-            assert!(
-                !input.contains("Setup Database"),
-                "File references should not contain task content"
-            );
-            assert!(
-                !input.contains("Create Models"),
-                "File references should not contain task content"
+                input.contains("Created data models"),
+                "Input should contain second completed task summary"
             );
 
             // Verify the task content is also present
@@ -1813,6 +1977,12 @@ mod tests {
             assert!(
                 completed_tasks_end < task_pos,
                 "COMPLETED_TASKS section should appear before task content"
+            );
+
+            // Verify no file paths leak into COMPLETED_TASKS
+            assert!(
+                !input.contains(".mcgravity/todo/done/"),
+                "COMPLETED_TASKS should not contain done-file paths"
             );
         }
 
@@ -1852,8 +2022,10 @@ mod tests {
             .unwrap();
 
             let inputs = executor.get_recorded_inputs();
-            assert_eq!(inputs.len(), 1);
+            // 2 calls: execution + summary generation
+            assert_eq!(inputs.len(), 2);
 
+            // First call is the execution prompt
             let input = &inputs[0];
 
             // Verify COMPLETED_TASKS section exists but is empty
@@ -1906,19 +2078,21 @@ mod tests {
             .await
             .unwrap();
 
-            // Verify task_text was updated with the completed task file reference
+            // Verify task_text was updated with a summary (not a file path)
             assert!(
                 task_text.contains("<COMPLETED_TASKS>"),
                 "task_text should contain COMPLETED_TASKS block"
             );
+            // The summary should contain task content derived from extract_task_summary fallback
+            // (since MockExecutor doesn't produce summary output, it falls back to local extraction)
             assert!(
-                task_text.contains(".mcgravity/todo/done/task-001.md"),
-                "task_text should contain the archived file path reference"
+                task_text.contains("Task 001: Setup Database"),
+                "task_text should contain task summary derived from content"
             );
-            // File references should NOT contain task content
+            // Archived file paths should NOT appear in COMPLETED_TASKS
             assert!(
-                !task_text.contains("Task 001: Setup Database"),
-                "task_text should not contain task title - only file reference"
+                !task_text.contains(".mcgravity/todo/done/"),
+                "task_text should not contain archived file path references"
             );
 
             // Verify task.md was persisted
@@ -1929,8 +2103,12 @@ mod tests {
             );
             let saved_content = fs::read_to_string(&task_md_path).await.unwrap();
             assert!(
-                saved_content.contains(".mcgravity/todo/done/task-001.md"),
-                "Persisted task.md should contain the archived file reference"
+                !saved_content.contains(".mcgravity/todo/done/"),
+                "Persisted task.md should not contain archived file path references"
+            );
+            assert!(
+                saved_content.contains("<COMPLETED_TASKS>"),
+                "Persisted task.md should contain COMPLETED_TASKS block"
             );
         }
 
@@ -2035,27 +2213,29 @@ mod tests {
             .await
             .unwrap();
 
-            // Verify executor was called twice
-            assert_eq!(executor.get_call_count(), 2);
+            // 2 tasks × 2 calls each (execution + summary generation)
+            assert_eq!(executor.get_call_count(), 4);
 
             let inputs = executor.get_recorded_inputs();
-            assert_eq!(inputs.len(), 2);
+            // 4 inputs: exec1, summary1, exec2, summary2
+            assert_eq!(inputs.len(), 4);
 
-            // First task should have empty completed tasks
+            // First execution should have empty completed tasks
             assert!(
                 inputs[0].contains("<COMPLETED_TASKS>\n\n</COMPLETED_TASKS>"),
-                "First task should have empty COMPLETED_TASKS"
+                "First task execution should have empty COMPLETED_TASKS"
             );
 
-            // Second task should see the first task file reference as completed
+            // Second execution (index 2) should see the first task summary as completed
             assert!(
-                inputs[1].contains(".mcgravity/todo/done/task-001.md"),
-                "Second task should see archived task-001.md path in COMPLETED_TASKS"
+                inputs[2].contains("Task 001: First"),
+                "Second task execution should see first task summary in COMPLETED_TASKS"
             );
-            // File references should NOT contain task content
+
+            // No file paths should appear in any execution input's COMPLETED_TASKS
             assert!(
-                !inputs[1].contains("Task 001: First"),
-                "Second task should not see task title - only file reference"
+                !inputs[2].contains(".mcgravity/todo/done/"),
+                "Second task execution should not see done-file paths in COMPLETED_TASKS"
             );
 
             // Both files should be absent from todo folder and present in done folder
@@ -2077,14 +2257,666 @@ mod tests {
                 "Second todo file should be archived to done folder"
             );
 
-            // Final task_text should contain both completed task file references
+            // Final task_text should contain both completed task summaries (not file paths)
             assert!(
-                task_text.contains(".mcgravity/todo/done/task-001.md"),
-                "Final task_text should contain archived task-001.md path"
+                task_text.contains("Task 001: First"),
+                "Final task_text should contain first task summary"
             );
             assert!(
-                task_text.contains(".mcgravity/todo/done/task-002.md"),
-                "Final task_text should contain archived task-002.md path"
+                task_text.contains("Task 002: Second"),
+                "Final task_text should contain second task summary"
+            );
+            // No file paths in the final task_text
+            assert!(
+                !task_text.contains(".mcgravity/todo/done/"),
+                "Final task_text should not contain done-file paths"
+            );
+
+            // Each summary entry should be capped below 500 characters
+            let summary = extract_completed_tasks_summary(&task_text);
+            for line in summary.lines() {
+                assert!(
+                    line.len() < MAX_SUMMARY_ENTRY_LENGTH,
+                    "Each summary entry should be under {MAX_SUMMARY_ENTRY_LENGTH} chars, got {}",
+                    line.len()
+                );
+            }
+        }
+
+        /// Tests that legacy path entries in `task_text` are cleaned before planning.
+        /// This verifies the normalization applied in `run_flow` before the main loop.
+        #[tokio::test]
+        async fn legacy_path_entries_cleaned_from_task_text() {
+            use crate::core::task_utils::normalize_task_text_completed_section;
+
+            let dir = TempDir::new().unwrap();
+            let paths = test_paths(&dir);
+            let todo_dir = paths.todo_dir();
+            fs::create_dir_all(&todo_dir).await.unwrap();
+
+            let todo_file = todo_dir.join("task-003.md");
+            fs::write(&todo_file, "# Task 003: New Work\n\nDo something.")
+                .await
+                .unwrap();
+
+            let files = vec![todo_file];
+
+            let executor = MockExecutor::new_success("MockExecutor");
+            let retry_config = RetryConfig::default();
+            let (tx, _rx) = mpsc::channel(100);
+            let shutdown_rx = create_shutdown_rx();
+
+            // Create task_text with legacy path-based COMPLETED_TASKS entries
+            let mut task_text = r"Initial task description
+
+<COMPLETED_TASKS>
+- /home/tigran/projects/ungravity/mcgravity/.mcgravity/todo/done/task-001.md
+- /home/tigran/projects/ungravity/mcgravity/.mcgravity/todo/done/task-002.md
+- Added retry logic with exponential backoff
+</COMPLETED_TASKS>
+"
+            .to_string();
+
+            // Apply normalization as run_flow does before planning
+            task_text = normalize_task_text_completed_section(&task_text);
+
+            // Verify legacy paths were removed
+            assert!(
+                !task_text.contains("/home/"),
+                "Legacy /home/ paths should be removed after normalization"
+            );
+            assert!(
+                !task_text.contains(".mcgravity/todo/done/"),
+                "Legacy done-file paths should be removed after normalization"
+            );
+            assert!(
+                task_text.contains("Added retry logic"),
+                "Clean summaries should be preserved after normalization"
+            );
+
+            // Now run process_todos_phase with the cleaned task_text
+            process_todos_phase(
+                &files,
+                &mut task_text,
+                &executor,
+                &retry_config,
+                &tx,
+                &shutdown_rx,
+                &paths,
+            )
+            .await
+            .unwrap();
+
+            let inputs = executor.get_recorded_inputs();
+            // 2 calls: execution + summary generation
+            assert_eq!(inputs.len(), 2);
+
+            // Verify execution input contains clean summary, not paths
+            assert!(
+                inputs[0].contains("Added retry logic"),
+                "Execution input should contain clean summary text"
+            );
+            assert!(
+                !inputs[0].contains("/home/tigran"),
+                "Execution input should not contain legacy absolute paths"
+            );
+            assert!(
+                !inputs[0].contains(".mcgravity/todo/done/task-001"),
+                "Execution input should not contain done-file path references"
+            );
+        }
+
+        /// Tests that model-generated summary with paths is normalized.
+        #[tokio::test]
+        async fn model_summary_with_paths_is_normalized() {
+            let dir = TempDir::new().unwrap();
+            let paths = test_paths(&dir);
+            let todo_dir = paths.todo_dir();
+            fs::create_dir_all(&todo_dir).await.unwrap();
+
+            let todo_file = todo_dir.join("task-001.md");
+            fs::write(
+                &todo_file,
+                "# Task 001: Setup Database\n\n## Objective\nConfigure PostgreSQL.",
+            )
+            .await
+            .unwrap();
+
+            let files = vec![todo_file];
+
+            // Mock executor that returns summary text containing paths
+            let executor = MockExecutor::new_success("MockExecutor")
+                .with_output("Updated /home/user/project/src/core/executor.rs to add retry logic");
+            let retry_config = RetryConfig::default();
+            let (tx, _rx) = mpsc::channel(100);
+            let shutdown_rx = create_shutdown_rx();
+            let mut task_text = "Initial task description".to_string();
+
+            process_todos_phase(
+                &files,
+                &mut task_text,
+                &executor,
+                &retry_config,
+                &tx,
+                &shutdown_rx,
+                &paths,
+            )
+            .await
+            .unwrap();
+
+            // Verify the summary in task_text does not contain paths
+            assert!(
+                !task_text.contains("/home/"),
+                "task_text should not contain absolute paths from model output"
+            );
+            // It should have fallen back to local extraction
+            assert!(
+                task_text.contains("Task 001: Setup Database"),
+                "task_text should contain fallback summary from local extraction"
+            );
+        }
+
+        /// Regression test: summary generation with output exceeding channel capacity
+        /// completes without deadlocking.
+        ///
+        /// Before the fix, `generate_task_summary()` would deadlock when the executor
+        /// produced more output than the channel buffer (100) because output was only
+        /// drained after `execute()` returned, but `execute()` blocked on a full channel.
+        #[tokio::test]
+        async fn summary_generation_does_not_deadlock_on_verbose_output() {
+            /// A mock executor that sends many individual output messages to exceed
+            /// the channel buffer capacity and trigger backpressure.
+            #[derive(Debug)]
+            struct VerboseExecutor {
+                line_count: usize,
+            }
+
+            #[async_trait]
+            impl AiCliExecutor for VerboseExecutor {
+                async fn execute(
+                    &self,
+                    _input: &str,
+                    output_tx: mpsc::Sender<CliOutput>,
+                    _shutdown_rx: watch::Receiver<bool>,
+                ) -> Result<ExitStatus> {
+                    // Send more lines than the channel capacity (100)
+                    for i in 0..self.line_count {
+                        output_tx
+                            .send(CliOutput::Stdout(format!("output line {i}")))
+                            .await
+                            .ok();
+                    }
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::ExitStatusExt;
+                        Ok(ExitStatus::from_raw(0))
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        Ok(std::process::Command::new("true")
+                            .status()
+                            .unwrap_or_else(|_| panic!("Cannot create exit status")))
+                    }
+                }
+
+                fn name(&self) -> &'static str {
+                    "Verbose"
+                }
+                fn command(&self) -> &'static str {
+                    "mock"
+                }
+                fn is_available(&self) -> bool {
+                    true
+                }
+            }
+
+            let dir = TempDir::new().unwrap();
+            let paths = test_paths(&dir);
+            let todo_dir = paths.todo_dir();
+            fs::create_dir_all(&todo_dir).await.unwrap();
+
+            let todo_file = todo_dir.join("task-001.md");
+            fs::write(
+                &todo_file,
+                "# Task 001: Verbose\n\n## Objective\nGenerate verbose output.",
+            )
+            .await
+            .unwrap();
+
+            let files = vec![todo_file];
+            // 200 lines exceeds the channel buffer of 100
+            let executor = VerboseExecutor { line_count: 200 };
+            let retry_config = RetryConfig::default();
+            let (tx, _rx) = mpsc::channel(1000);
+            let shutdown_rx = create_shutdown_rx();
+            let mut task_text = "Initial task description".to_string();
+
+            // This must complete within a timeout; a deadlock would hang forever.
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                process_todos_phase(
+                    &files,
+                    &mut task_text,
+                    &executor,
+                    &retry_config,
+                    &tx,
+                    &shutdown_rx,
+                    &paths,
+                ),
+            )
+            .await;
+
+            assert!(
+                result.is_ok(),
+                "process_todos_phase should complete without deadlocking"
+            );
+            assert!(
+                result.unwrap().is_ok(),
+                "process_todos_phase should succeed"
+            );
+        }
+
+        /// Regression: captured execution output passed to the summary prompt is bounded.
+        ///
+        /// When the executor produces output much larger than `MAX_CAPTURED_OUTPUT_BYTES`,
+        /// the captured output used for summary generation must be deterministically
+        /// truncated (live UI forwarding is unaffected).
+        #[tokio::test]
+        async fn summary_generation_uses_bounded_captured_output() {
+            /// A mock executor whose execution call produces oversized output and
+            /// whose summary call succeeds with clean text.
+            #[derive(Debug)]
+            struct OversizedOutputExecutor {
+                call_count: AtomicU32,
+            }
+
+            #[async_trait]
+            impl AiCliExecutor for OversizedOutputExecutor {
+                async fn execute(
+                    &self,
+                    _input: &str,
+                    output_tx: mpsc::Sender<CliOutput>,
+                    _shutdown_rx: watch::Receiver<bool>,
+                ) -> Result<ExitStatus> {
+                    let call = self.call_count.fetch_add(1, Ordering::SeqCst);
+                    if call == 0 {
+                        // First call is execution: send oversized output
+                        // Send 200KB worth of output in chunks
+                        for i in 0..2000 {
+                            output_tx
+                                .send(CliOutput::Stdout(format!("line {i}: {}", "X".repeat(100))))
+                                .await
+                                .ok();
+                        }
+                    } else {
+                        // Second call is summary generation: return clean text
+                        output_tx
+                            .send(CliOutput::Stdout(
+                                "Added bounded output capture for summary generation".to_string(),
+                            ))
+                            .await
+                            .ok();
+                    }
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::ExitStatusExt;
+                        Ok(ExitStatus::from_raw(0))
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        Ok(std::process::Command::new("true")
+                            .status()
+                            .unwrap_or_else(|_| panic!("Cannot create exit status")))
+                    }
+                }
+
+                fn name(&self) -> &'static str {
+                    "OversizedOutput"
+                }
+                fn command(&self) -> &'static str {
+                    "mock"
+                }
+                fn is_available(&self) -> bool {
+                    true
+                }
+            }
+
+            let dir = TempDir::new().unwrap();
+            let paths = test_paths(&dir);
+            let todo_dir = paths.todo_dir();
+            fs::create_dir_all(&todo_dir).await.unwrap();
+
+            let todo_file = todo_dir.join("task-001.md");
+            fs::write(
+                &todo_file,
+                "# Task 001: Bounded\n\n## Objective\nTest bounded capture.",
+            )
+            .await
+            .unwrap();
+
+            let files = vec![todo_file];
+            let executor = OversizedOutputExecutor {
+                call_count: AtomicU32::new(0),
+            };
+            let retry_config = RetryConfig::default();
+            let (tx, _rx) = mpsc::channel(10_000);
+            let shutdown_rx = create_shutdown_rx();
+            let mut task_text = "Initial task description".to_string();
+
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                process_todos_phase(
+                    &files,
+                    &mut task_text,
+                    &executor,
+                    &retry_config,
+                    &tx,
+                    &shutdown_rx,
+                    &paths,
+                ),
+            )
+            .await;
+
+            assert!(
+                result.is_ok(),
+                "process_todos_phase should complete without deadlocking"
+            );
+            assert!(
+                result.unwrap().is_ok(),
+                "process_todos_phase should succeed"
+            );
+            // Verify the summary was added (from bounded capture)
+            assert!(
+                task_text.contains("<COMPLETED_TASKS>"),
+                "task_text should have COMPLETED_TASKS block after bounded capture"
+            );
+        }
+
+        /// Regression: `process_todos_phase` never writes bare/empty completed-task list entries.
+        ///
+        /// When both the model output and the local extraction produce only path
+        /// references (which get stripped), the fallback must produce a non-empty
+        /// deterministic summary entry.
+        #[tokio::test]
+        async fn process_todos_phase_never_writes_bare_entries() {
+            let dir = TempDir::new().unwrap();
+            let paths = test_paths(&dir);
+            let todo_dir = paths.todo_dir();
+            fs::create_dir_all(&todo_dir).await.unwrap();
+
+            // Create a minimal todo file with no title/objective (worst case for extraction)
+            let todo_file = todo_dir.join("task-001.md");
+            fs::write(&todo_file, "").await.unwrap();
+
+            let files = vec![todo_file];
+
+            // Executor succeeds but produces no output (empty summary scenario)
+            let executor = MockExecutor::new_success("MockExecutor");
+            let retry_config = RetryConfig::default();
+            let (tx, _rx) = mpsc::channel(100);
+            let shutdown_rx = create_shutdown_rx();
+            let mut task_text = "Initial task description".to_string();
+
+            process_todos_phase(
+                &files,
+                &mut task_text,
+                &executor,
+                &retry_config,
+                &tx,
+                &shutdown_rx,
+                &paths,
+            )
+            .await
+            .unwrap();
+
+            // Verify COMPLETED_TASKS block was added
+            assert!(
+                task_text.contains("<COMPLETED_TASKS>"),
+                "task_text should have COMPLETED_TASKS block"
+            );
+
+            // Extract the block content and ensure no bare entries
+            let open = task_text.find("<COMPLETED_TASKS>").unwrap();
+            let close = task_text.find("</COMPLETED_TASKS>").unwrap();
+            let block = &task_text[open + "<COMPLETED_TASKS>".len()..close];
+            for line in block.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                // No bare "- " entries
+                let without_marker = trimmed.strip_prefix('-').unwrap_or(trimmed).trim();
+                assert!(
+                    !without_marker.is_empty(),
+                    "COMPLETED_TASKS must not contain bare list markers, found: {trimmed:?}"
+                );
+            }
+        }
+
+        /// Regression: completed-task summaries in `task_text` contain no path leakage.
+        #[tokio::test]
+        async fn process_todos_phase_no_path_leakage() {
+            let dir = TempDir::new().unwrap();
+            let paths = test_paths(&dir);
+            let todo_dir = paths.todo_dir();
+            fs::create_dir_all(&todo_dir).await.unwrap();
+
+            let todo_file = todo_dir.join("task-001.md");
+            fs::write(
+                &todo_file,
+                "# Task 001: Setup\n\n## Objective\nConfigure the system.",
+            )
+            .await
+            .unwrap();
+
+            let files = vec![todo_file];
+
+            let executor = MockExecutor::new_success("MockExecutor");
+            let retry_config = RetryConfig::default();
+            let (tx, _rx) = mpsc::channel(100);
+            let shutdown_rx = create_shutdown_rx();
+            let mut task_text = "Initial task description".to_string();
+
+            process_todos_phase(
+                &files,
+                &mut task_text,
+                &executor,
+                &retry_config,
+                &tx,
+                &shutdown_rx,
+                &paths,
+            )
+            .await
+            .unwrap();
+
+            // Verify no path leakage in the completed tasks block
+            assert!(
+                !task_text.contains("src/"),
+                "task_text must not contain repo-style src/ paths"
+            );
+            assert!(
+                !task_text.contains("./"),
+                "task_text must not contain ./ relative paths"
+            );
+            assert!(
+                !task_text.contains("../"),
+                "task_text must not contain ../ relative paths"
+            );
+            assert!(
+                !task_text.contains(".mcgravity/todo/done/"),
+                "task_text must not contain done-file paths"
+            );
+            assert!(
+                !task_text.contains("/home/"),
+                "task_text must not contain absolute paths"
+            );
+        }
+
+        /// Regression: multiline model summary output is collapsed into a single-line
+        /// entry in `<COMPLETED_TASKS>` with no embedded newlines.
+        #[tokio::test]
+        async fn process_todos_phase_multiline_summary_collapsed() {
+            let dir = TempDir::new().unwrap();
+            let paths = test_paths(&dir);
+            let todo_dir = paths.todo_dir();
+            fs::create_dir_all(&todo_dir).await.unwrap();
+
+            let todo_file = todo_dir.join("task-001.md");
+            fs::write(
+                &todo_file,
+                "# Task 001: Setup Database\n\n## Objective\nConfigure PostgreSQL.",
+            )
+            .await
+            .unwrap();
+
+            let files = vec![todo_file];
+
+            // Executor returns multiline summary output (simulating model that embeds newlines)
+            let executor = MockExecutor::new_success("MockExecutor")
+                .with_output("Added retry logic\nwith exponential backoff\nfor CLI executor");
+            let retry_config = RetryConfig::default();
+            let (tx, _rx) = mpsc::channel(100);
+            let shutdown_rx = create_shutdown_rx();
+            let mut task_text = "Initial task description".to_string();
+
+            process_todos_phase(
+                &files,
+                &mut task_text,
+                &executor,
+                &retry_config,
+                &tx,
+                &shutdown_rx,
+                &paths,
+            )
+            .await
+            .unwrap();
+
+            // Verify COMPLETED_TASKS block exists
+            assert!(
+                task_text.contains("<COMPLETED_TASKS>"),
+                "task_text should contain COMPLETED_TASKS block"
+            );
+
+            // Extract the block content and verify each entry is a single line
+            let open = task_text.find("<COMPLETED_TASKS>").unwrap();
+            let close = task_text.find("</COMPLETED_TASKS>").unwrap();
+            let block = &task_text[open + "<COMPLETED_TASKS>".len()..close];
+            for line in block.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                // Each entry must start with "- " and be a single line
+                assert!(
+                    trimmed.starts_with("- "),
+                    "Entry should start with '- ', got: {trimmed:?}"
+                );
+                // Verify the entry text (after "- ") contains no newlines
+                // (this is inherently true because we iterate `.lines()`, but
+                // we also verify the overall block has the expected shape)
+                let content = trimmed.strip_prefix("- ").unwrap();
+                assert!(
+                    !content.is_empty(),
+                    "Entry content must not be empty after '- '"
+                );
+            }
+
+            // Verify the persisted task.md also has single-line entries
+            let task_md_path = paths.task_file();
+            let saved_content = fs::read_to_string(&task_md_path).await.unwrap();
+            let saved_open = saved_content.find("<COMPLETED_TASKS>").unwrap();
+            let saved_close = saved_content.find("</COMPLETED_TASKS>").unwrap();
+            let saved_block = &saved_content[saved_open + "<COMPLETED_TASKS>".len()..saved_close];
+            let entry_lines: Vec<&str> = saved_block
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            assert!(
+                !entry_lines.is_empty(),
+                "Should have at least one completed task entry"
+            );
+            for entry in &entry_lines {
+                assert!(
+                    entry.starts_with("- "),
+                    "Persisted entry should start with '- ', got: {entry:?}"
+                );
+            }
+        }
+
+        /// Regression: when the model output is empty/invalid and the fallback summary
+        /// is used, the completed-task entry stored in `<COMPLETED_TASKS>` must not be
+        /// prematurely truncated to ~100 characters with `...`.
+        ///
+        /// The fallback path uses `extract_task_summary` (capped at 100 chars), but the
+        /// entry budget is 500 chars (`MAX_SUMMARY_ENTRY_LENGTH`). A long task objective
+        /// should be preserved up to the 500-char cap, not cut short by the intermediate
+        /// 100-char extraction limit.
+        ///
+        /// This test follows the CLAUDE.md "Testing" guideline:
+        ///   "Test core logic independently from TUI layer"
+        /// and rust.mdc "5.1. Unit Testing" for focused regression coverage.
+        #[tokio::test]
+        async fn summary_fallback_not_prematurely_truncated() {
+            let dir = TempDir::new().unwrap();
+            let paths = test_paths(&dir);
+            let todo_dir = paths.todo_dir();
+            fs::create_dir_all(&todo_dir).await.unwrap();
+
+            // Build a task file with a long objective (200+ chars).
+            // When fallback fires, the stored entry should retain more than 100 chars.
+            let long_objective = "A".repeat(250);
+            let todo_content =
+                format!("# Task 001: Long Objective Task\n\n## Objective\n{long_objective}\n");
+            let todo_file = todo_dir.join("task-001.md");
+            fs::write(&todo_file, &todo_content).await.unwrap();
+
+            let files = vec![todo_file];
+
+            // Executor succeeds but produces no output → triggers fallback path
+            let executor = MockExecutor::new_success("MockExecutor");
+            let retry_config = RetryConfig::default();
+            let (tx, _rx) = mpsc::channel(100);
+            let shutdown_rx = create_shutdown_rx();
+            let mut task_text = "Initial task description".to_string();
+
+            process_todos_phase(
+                &files,
+                &mut task_text,
+                &executor,
+                &retry_config,
+                &tx,
+                &shutdown_rx,
+                &paths,
+            )
+            .await
+            .unwrap();
+
+            // Extract the completed-tasks block
+            let summary = extract_completed_tasks_summary(&task_text);
+            assert!(
+                !summary.is_empty(),
+                "Should have a completed task summary entry"
+            );
+
+            // The entry must NOT be prematurely truncated to ~100 chars.
+            // With a 250-char objective + ~30-char title collapsed into a single
+            // line, the entry (with "- " prefix) should be ~280+ chars before the
+            // 500-char cap. The premature truncation bug would cut this to ~102 chars.
+            let entry_line = summary.lines().next().unwrap();
+            assert!(
+                entry_line.len() > 200,
+                "Fallback summary should preserve most of the 280-char content, \
+                 not be prematurely truncated to ~100 chars; got {} chars: {:?}",
+                entry_line.len(),
+                entry_line
+            );
+
+            // The entry must still be bounded at MAX_SUMMARY_ENTRY_LENGTH (500 chars)
+            assert!(
+                entry_line.len() <= MAX_SUMMARY_ENTRY_LENGTH,
+                "Summary entry must be capped at {MAX_SUMMARY_ENTRY_LENGTH} chars, got {}",
+                entry_line.len()
             );
         }
 
