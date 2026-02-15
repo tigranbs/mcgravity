@@ -1,6 +1,6 @@
 [package]
 name = "mcgravity"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 repository = "https://github.com/tigranbs/mcgravity"
 description = "TUI interface for orchestrating AI-assisted coding tools"
