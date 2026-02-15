@@ -252,6 +252,7 @@ mod tests {
             execution_model: "Codex".to_string(),
             enter_behavior: "Submit".to_string(),
             max_iterations: "5".to_string(),
+            summary_generation: String::new(),
         };
 
         paths.save_settings(&settings).unwrap();

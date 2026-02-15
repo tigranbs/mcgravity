@@ -81,6 +81,7 @@ pub async fn run_flow(
     execution_executor: &dyn AiCliExecutor,
     max_iterations: Option<u32>,
     paths: McgravityPaths,
+    use_model_summary: bool,
 ) -> Result<()> {
     let retry_config = RetryConfig::default();
 
@@ -223,6 +224,7 @@ pub async fn run_flow(
             &tx,
             &shutdown_rx,
             &paths,
+            use_model_summary,
         )
         .await?;
         if stop_if_shutdown(&shutdown_rx, &tx).await {
@@ -517,6 +519,7 @@ async fn check_todos_phase(
 /// Returns an error if reading a todo file fails. Individual execution failures
 /// are logged but do not stop processing of remaining files.
 #[allow(clippy::too_many_lines)] // Orchestration keeps todo processing steps together for clarity.
+#[allow(clippy::too_many_arguments)] // Phase function requires multiple config parameters.
 async fn process_todos_phase(
     todo_files: &[PathBuf],
     input_task_text: &mut String,
@@ -525,6 +528,7 @@ async fn process_todos_phase(
     tx: &mpsc::Sender<FlowEvent>,
     shutdown_rx: &watch::Receiver<bool>,
     paths: &McgravityPaths,
+    use_model_summary: bool,
 ) -> Result<()> {
     let file_count = todo_files.len();
     tx.send(FlowEvent::PhaseChanged(FlowPhase::ProcessingTodos {
@@ -611,6 +615,7 @@ async fn process_todos_phase(
             execution_executor,
             tx,
             shutdown_rx,
+            use_model_summary,
         )
         .await;
 
@@ -668,93 +673,121 @@ async fn process_todos_phase(
     Ok(())
 }
 
-/// Generates a short summary for a completed task by running the execution executor
-/// with the task-summary prompt.
+/// Extracts a `TASK_SUMMARY:` line from execution output.
+///
+/// Searches from the end of the output since the summary is most likely
+/// emitted as the last line. Returns the trimmed summary text, or `None`
+/// if no valid marker is found.
+fn extract_inline_summary(output: &str) -> Option<String> {
+    for line in output.lines().rev() {
+        let trimmed = line.trim();
+        if let Some(summary) = trimmed.strip_prefix("TASK_SUMMARY:") {
+            let summary = summary.trim();
+            if !summary.is_empty() {
+                return Some(summary.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Generates a short summary for a completed task.
+///
+/// Uses a three-tier strategy:
+/// 1. **Inline extraction**: Look for a `TASK_SUMMARY:` line in execution output
+/// 2. **Model call** (if `use_model_summary` is true): Run the executor with the
+///    task-summary prompt
+/// 3. **Local fallback**: Extract a summary from the task content directly
 ///
 /// The summary is capped at `MAX_SUMMARY_ENTRY_LENGTH` characters and formatted as
 /// a list item (prefixed with `"- "`).
 ///
 /// Output is consumed concurrently via a spawned receiver task to prevent
 /// backpressure deadlocks when executor output exceeds the channel buffer.
-///
-/// Falls back to a local content-based summary if the executor call fails.
 async fn generate_task_summary(
     task_content: &str,
     execution_output: &str,
     executor: &dyn AiCliExecutor,
     tx: &mpsc::Sender<FlowEvent>,
     shutdown_rx: &watch::Receiver<bool>,
+    use_model_summary: bool,
 ) -> String {
-    tx.send(FlowEvent::Output(OutputLine::running(
-        "Generating task summary...",
-    )))
-    .await
-    .ok();
+    // Try 1: Extract inline TASK_SUMMARY from execution output
+    if let Some(inline) = extract_inline_summary(execution_output)
+        && let Some(normalized) = normalize_summary_entry(&inline)
+    {
+        tx.send(FlowEvent::Output(OutputLine::info(
+            "Extracted inline task summary",
+        )))
+        .await
+        .ok();
+        let entry = format!("- {normalized}");
+        return truncate_summary(&entry, MAX_SUMMARY_ENTRY_LENGTH);
+    }
 
-    let summary_prompt = wrap_for_task_summary(task_content, execution_output);
+    // Try 2: Separate model call (if enabled)
+    if use_model_summary {
+        tx.send(FlowEvent::Output(OutputLine::running(
+            "Generating task summary...",
+        )))
+        .await
+        .ok();
 
-    // Create a channel to capture the summary output
-    let (output_tx, mut output_rx) = mpsc::channel::<CliOutput>(100);
+        let summary_prompt = wrap_for_task_summary(task_content, execution_output);
 
-    // Spawn a receiver task to consume output concurrently, preventing
-    // backpressure deadlocks when output exceeds channel capacity.
-    // Capture is bounded at `MAX_CAPTURED_OUTPUT_BYTES` to avoid unbounded
-    // in-memory accumulation for summary payload construction.
-    let receiver_handle = tokio::spawn(async move {
-        let mut captured = String::new();
-        let mut capture_full = true;
-        while let Some(output) = output_rx.recv().await {
-            match output {
-                CliOutput::Stdout(s) | CliOutput::Stderr(s) => {
-                    if capture_full {
-                        if !captured.is_empty() {
-                            captured.push('\n');
-                        }
-                        captured.push_str(&s);
-                        if captured.len() > MAX_CAPTURED_OUTPUT_BYTES {
-                            captured.truncate(MAX_CAPTURED_OUTPUT_BYTES);
-                            while !captured.is_char_boundary(captured.len()) {
-                                captured.pop();
+        // Create a channel to capture the summary output
+        let (output_tx, mut output_rx) = mpsc::channel::<CliOutput>(100);
+
+        // Spawn a receiver task to consume output concurrently, preventing
+        // backpressure deadlocks when output exceeds channel capacity.
+        // Capture is bounded at `MAX_CAPTURED_OUTPUT_BYTES` to avoid unbounded
+        // in-memory accumulation for summary payload construction.
+        let receiver_handle = tokio::spawn(async move {
+            let mut captured = String::new();
+            let mut capture_full = true;
+            while let Some(output) = output_rx.recv().await {
+                match output {
+                    CliOutput::Stdout(s) | CliOutput::Stderr(s) => {
+                        if capture_full {
+                            if !captured.is_empty() {
+                                captured.push('\n');
                             }
-                            capture_full = false;
+                            captured.push_str(&s);
+                            if captured.len() > MAX_CAPTURED_OUTPUT_BYTES {
+                                captured.truncate(MAX_CAPTURED_OUTPUT_BYTES);
+                                while !captured.is_char_boundary(captured.len()) {
+                                    captured.pop();
+                                }
+                                capture_full = false;
+                            }
                         }
+                        // Always consume from channel to prevent backpressure
                     }
-                    // Always consume from channel to prevent backpressure
                 }
             }
+            captured
+        });
+
+        let exec_result = executor
+            .execute(&summary_prompt, output_tx, shutdown_rx.clone())
+            .await;
+
+        // Wait for the receiver task to finish collecting output.
+        let captured_model_output = receiver_handle.await.unwrap_or_default();
+
+        if exec_result.is_ok_and(|s| s.success()) && !captured_model_output.trim().is_empty() {
+            let raw_summary = captured_model_output.trim().to_string();
+            if let Some(normalized) = normalize_summary_entry(&raw_summary) {
+                let entry = format!("- {normalized}");
+                return truncate_summary(&entry, MAX_SUMMARY_ENTRY_LENGTH);
+            }
         }
-        captured
-    });
+    }
 
-    let exec_result = executor
-        .execute(&summary_prompt, output_tx, shutdown_rx.clone())
-        .await;
-
-    // Wait for the receiver task to finish collecting output.
-    // The channel closes when `output_tx` is dropped by the executor,
-    // which causes the receiver loop to exit.
-    let captured_output = receiver_handle.await.unwrap_or_default();
-
-    let raw_summary =
-        if exec_result.is_ok_and(|s| s.success()) && !captured_output.trim().is_empty() {
-            captured_output.trim().to_string()
-        } else {
-            // Fallback: use local extraction with the full entry budget so the
-            // summary is not prematurely truncated to 100 chars.
-            extract_task_summary_with_max_len(task_content, MAX_SUMMARY_ENTRY_LENGTH)
-        };
-
-    // Normalize the summary: strip any path references the model may have included.
-    // If normalization empties the text, fall back to local extraction, then to a
-    // deterministic placeholder to guarantee we never produce a bare/empty list entry.
-    let summary_text = normalize_summary_entry(&raw_summary)
-        .or_else(|| {
-            let fallback =
-                extract_task_summary_with_max_len(task_content, MAX_SUMMARY_ENTRY_LENGTH);
-            normalize_summary_entry(&fallback)
-        })
-        .unwrap_or_else(|| "Completed task".to_string());
-
+    // Try 3: Local extraction fallback
+    let fallback = extract_task_summary_with_max_len(task_content, MAX_SUMMARY_ENTRY_LENGTH);
+    let summary_text =
+        normalize_summary_entry(&fallback).unwrap_or_else(|| "Completed task".to_string());
     let entry = format!("- {summary_text}");
     truncate_summary(&entry, MAX_SUMMARY_ENTRY_LENGTH)
 }
@@ -961,6 +994,59 @@ mod tests {
     /// Creates `McgravityPaths` from the given temp directory.
     fn test_paths(temp_dir: &TempDir) -> McgravityPaths {
         McgravityPaths::new(temp_dir.path())
+    }
+
+    // =========================================================================
+    // extract_inline_summary tests
+    // =========================================================================
+
+    #[test]
+    fn extract_inline_summary_returns_some_for_valid_marker() {
+        let output = "TASK_SUMMARY: Added retry logic with exponential backoff.";
+        assert_eq!(
+            extract_inline_summary(output),
+            Some("Added retry logic with exponential backoff.".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_inline_summary_returns_none_when_absent() {
+        let output = "Some execution output\nNo summary here\nDone.";
+        assert_eq!(extract_inline_summary(output), None);
+    }
+
+    #[test]
+    fn extract_inline_summary_finds_marker_at_end_of_multiline() {
+        let output = "Line 1\nLine 2\nLine 3\nTASK_SUMMARY: Refactored the CLI executor.";
+        assert_eq!(
+            extract_inline_summary(output),
+            Some("Refactored the CLI executor.".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_inline_summary_handles_empty_after_marker() {
+        let output = "TASK_SUMMARY:   ";
+        assert_eq!(extract_inline_summary(output), None);
+    }
+
+    #[test]
+    fn extract_inline_summary_takes_last_occurrence() {
+        let output =
+            "TASK_SUMMARY: First summary\nMore output\nTASK_SUMMARY: Second summary (final)";
+        assert_eq!(
+            extract_inline_summary(output),
+            Some("Second summary (final)".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_inline_summary_trims_whitespace() {
+        let output = "  TASK_SUMMARY:   Added tests for the new feature.  ";
+        assert_eq!(
+            extract_inline_summary(output),
+            Some("Added tests for the new feature.".to_string())
+        );
     }
 
     // =========================================================================
@@ -1644,6 +1730,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await;
 
@@ -1694,6 +1781,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await
             .unwrap();
@@ -1769,6 +1857,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await
             .unwrap();
@@ -1816,6 +1905,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await;
 
@@ -1843,6 +1933,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await;
 
@@ -1879,6 +1970,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await
             .unwrap();
@@ -1929,6 +2021,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await
             .unwrap();
@@ -2017,6 +2110,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await
             .unwrap();
@@ -2074,6 +2168,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await
             .unwrap();
@@ -2143,6 +2238,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await
             .unwrap();
@@ -2209,6 +2305,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await
             .unwrap();
@@ -2343,6 +2440,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await
             .unwrap();
@@ -2400,6 +2498,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await
             .unwrap();
@@ -2502,6 +2601,7 @@ mod tests {
                     &tx,
                     &shutdown_rx,
                     &paths,
+                    true,
                 ),
             )
             .await;
@@ -2613,6 +2713,7 @@ mod tests {
                     &tx,
                     &shutdown_rx,
                     &paths,
+                    true,
                 ),
             )
             .await;
@@ -2665,6 +2766,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await
             .unwrap();
@@ -2725,6 +2827,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await
             .unwrap();
@@ -2787,6 +2890,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await
             .unwrap();
@@ -2888,6 +2992,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await
             .unwrap();
@@ -2953,6 +3058,7 @@ mod tests {
                 &tx,
                 &shutdown_rx,
                 &paths,
+                true,
             )
             .await
             .unwrap();

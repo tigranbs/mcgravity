@@ -97,6 +97,7 @@ mod first_run_detection_tests {
             execution_model: "Gemini".to_string(),
             enter_behavior: "Submit".to_string(),
             max_iterations: "5".to_string(),
+            summary_generation: String::new(),
         };
         paths.save_settings(&settings)?;
 
@@ -139,6 +140,7 @@ mod subsequent_run_tests {
             execution_model: "Gemini".to_string(),
             enter_behavior: "Newline".to_string(),
             max_iterations: "10".to_string(),
+            summary_generation: String::new(),
         };
         paths.save_settings(&settings)?;
 
@@ -178,6 +180,7 @@ mod subsequent_run_tests {
             execution_model: String::new(),
             enter_behavior: "unknown".to_string(),
             max_iterations: "999".to_string(),
+            summary_generation: String::new(),
         };
         paths.save_settings(&settings)?;
 

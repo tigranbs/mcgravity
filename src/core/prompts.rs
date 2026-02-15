@@ -174,10 +174,10 @@ Each task file MUST:
 Each task file MUST follow this exact format:
 
 ```markdown
-# Task NNN: [Brief Descriptive Title]
+# Task NNN: [Brief Descriptive Title - NO file paths]
 
 ## Objective
-[One clear sentence describing what this task accomplishes]
+[One clear sentence describing what this task accomplishes. NO file paths - paths belong in Reference Files only.]
 
 ## Context
 [Why this task is needed and how it fits into the larger plan. Include any dependencies on other tasks.]
@@ -238,8 +238,6 @@ Each task file MUST follow this exact format:
 - **DO NOT combine unrelated changes** - one logical change per task
 
 ---
-
-<PLAN>
 ";
 
 /// Postfix added after the user's input text during the planning phase.
@@ -326,7 +324,7 @@ You are a senior software engineer implementing a specific task in a Rust projec
 
 You will receive two pieces of information:
 - **<TASK_SPECIFICATION>**: The task to implement
-- **<COMPLETED_TASKS>**: Short inline summaries of previously completed tasks (for reference only)
+- **<COMPLETED_TASKS>**: Summaries of previously completed tasks. Use these to understand what has already changed in the codebase, avoid conflicting modifications, and build on previous work.
 
 Your job is to implement ONLY what is specified in `<TASK_SPECIFICATION>` - nothing more, nothing less.
 
@@ -349,7 +347,6 @@ Carefully read all files mentioned in `<TASK_SPECIFICATION>`'s Reference Files s
 - Understand existing code patterns and naming conventions
 - Identify the exact locations where changes are needed
 - Note any dependencies or constraints
-- Confirm whether the task is already satisfied by the current code. If it is, do NOT make changes; summarize the evidence and stop.
 
 ## Step 3: Implement the Task
 
@@ -381,22 +378,12 @@ This ensures:
 - **Minimal diffs** - Change only what is necessary; avoid unrelated reformatting
 - **Consistent style** - Match existing code patterns and naming conventions
 - **Self-documenting code** - Add comments only where logic is not self-evident
-- **All checks pass** - `cargo fmt && cargo clippy && cargo build && cargo test` must succeed
+- **All checks pass** - The quality pipeline from Step 4 must succeed
 - **Fix all warnings** - Never ignore clippy warnings; they often indicate real issues
-
-# Output Format
-
-After completing the task, summarize your work:
-
-1. **Changes made**: List files modified and what was changed
-2. **Tests run**: Report test results (pass/fail counts, any failures)
-3. **Blockers**: Note any issues encountered or checks that could not be run
-
-If any quality checks could not be run, state which checks were skipped and why.
 
 # Edge Cases
 
-- **Task already satisfied**: Verify by reading reference files; if satisfied, summarize evidence and stop
+- **Task already satisfied**: If reading the reference files reveals the task is already complete, output the TASK_SUMMARY line and stop without making changes
 - **Conflicting instructions**: Project guidelines override `<TASK_SPECIFICATION>`; report and stop
 - **Blocked on external dependency**: Document the blocker clearly; do not proceed with partial implementation
 - **Tests fail after changes**: Investigate root cause and fix; do not submit with failing tests
@@ -455,13 +442,11 @@ cargo fmt && cargo clippy && cargo build && cargo test
 
 Ensure all checks pass before considering the task complete. If any check fails, fix the issues and re-run the pipeline.
 
-## Critical Reminders
+## Reminders
 
-**DO NOT run any git commit or git push commands.** Version control operations are handled separately by the user after reviewing your changes.
-
-**DO NOT run any git add commands.** Do not stage files for commit; the user will handle this.
-
-**Implement ONLY what the task specifies.** Do not add extra features, refactor unrelated code, or make improvements beyond the task scope.
+- No git operations (commit, push, add)
+- Implement only what the task specifies
+- No extra features or refactoring
 
 ## Response Format
 
@@ -470,6 +455,10 @@ After completing the task, summarize your work:
 1. **Changes made**: List files modified and what was changed
 2. **Tests run**: Report test results (pass/fail counts, any failures)
 3. **Blockers**: Note any issues encountered or checks that could not be run
+4. **Summary**: As the very last line of your response, output a single summary line in this exact format:
+   TASK_SUMMARY: <one concise sentence describing what was accomplished, no file paths, no code, no markdown>
+   This line must appear on its own line, unindented, with no other text on it. Keep it under 500 characters.
+   Example: TASK_SUMMARY: Added retry logic with exponential backoff to handle transient CLI executor failures gracefully.
 
 If any quality checks could not be run, state which checks were skipped and why.
 ";
@@ -562,13 +551,19 @@ Read the task specification and its execution output below, then produce a **sin
 - **No file paths** - do not reference specific file paths (e.g., `src/core/foo.rs`)
 - **No code snippets** - do not include inline code or code blocks
 - **Focus on outcomes** - describe what changed or was achieved, not implementation details
-- **Plain text only** - no markdown formatting, no bullet points, no headings
+- **Plain text only** - a single sentence or two, no backticks, no code fences, no markdown formatting
 - Output ONLY the summary text, nothing else
 
-## Example
+## Examples
 
-Good: "Added retry logic with exponential backoff to the CLI executor so transient failures are handled gracefully."
-Bad: "Updated `src/core/executor.rs` to add a `retry_with_backoff` function that wraps..."
+Bad: "Updated `src/core/executor.rs` to add retry with backoff"
+Good: "Added retry logic with exponential backoff to the CLI executor"
+
+Bad: "Modified the flow runner in src/core/runner.rs"
+Good: "Restructured the flow orchestration to support inline summary extraction"
+
+Bad: "- Refactored **error handling** to use `anyhow::Context`\n- Updated tests"
+Good: "Improved error handling with contextual messages and updated related tests"
 
 ---
 
@@ -1048,10 +1043,10 @@ mod tests {
     }
 
     #[test]
-    fn test_execution_prefix_has_output_format_section() {
+    fn test_execution_has_response_format_in_postfix() {
         assert!(
-            EXECUTION_PREFIX_TEMPLATE.contains("# Output Format"),
-            "EXECUTION_PREFIX_TEMPLATE should contain '# Output Format' section"
+            EXECUTION_POSTFIX_TEMPLATE.contains("## Response Format"),
+            "EXECUTION_POSTFIX_TEMPLATE should contain '## Response Format' section"
         );
     }
 
@@ -1091,8 +1086,9 @@ mod tests {
     #[test]
     fn test_execution_postfix_reinforces_git_add_prohibition() {
         assert!(
-            EXECUTION_POSTFIX_TEMPLATE.contains("DO NOT run any git add"),
-            "EXECUTION_POSTFIX_TEMPLATE should reinforce git add prohibition"
+            EXECUTION_POSTFIX_TEMPLATE.contains("No git operations")
+                && EXECUTION_POSTFIX_TEMPLATE.contains("commit, push, add"),
+            "EXECUTION_POSTFIX_TEMPLATE should reinforce git prohibition including add"
         );
     }
 
@@ -1169,9 +1165,9 @@ mod tests {
             "EXECUTION_PREFIX_TEMPLATE should reference COMPLETED_TASKS section"
         );
         assert!(
-            EXECUTION_PREFIX_TEMPLATE.contains("for reference only")
-                || EXECUTION_PREFIX_TEMPLATE.contains("previously completed"),
-            "EXECUTION_PREFIX_TEMPLATE should indicate completed tasks are for reference"
+            EXECUTION_PREFIX_TEMPLATE.contains("previously completed")
+                || EXECUTION_PREFIX_TEMPLATE.contains("already changed"),
+            "EXECUTION_PREFIX_TEMPLATE should indicate completed tasks provide context"
         );
         assert!(
             !EXECUTION_PREFIX_TEMPLATE.contains("Check Completed Tasks"),
@@ -1442,8 +1438,8 @@ mod tests {
     #[test]
     fn test_execution_postfix_reinforces_git_prohibitions() {
         assert!(
-            EXECUTION_POSTFIX_TEMPLATE.contains("DO NOT run any git commit or git push"),
-            "EXECUTION_POSTFIX_TEMPLATE should reinforce git commit/push prohibition"
+            EXECUTION_POSTFIX_TEMPLATE.contains("No git operations"),
+            "EXECUTION_POSTFIX_TEMPLATE should reinforce git prohibition"
         );
     }
 
@@ -1535,7 +1531,8 @@ mod tests {
     #[test]
     fn test_execution_postfix_reinforces_task_only_scope() {
         assert!(
-            EXECUTION_POSTFIX_TEMPLATE.contains("ONLY what the task specifies"),
+            EXECUTION_POSTFIX_TEMPLATE.contains("only what the task specifies")
+                || EXECUTION_POSTFIX_TEMPLATE.contains("ONLY what the task specifies"),
             "EXECUTION_POSTFIX_TEMPLATE should reinforce task-only scope"
         );
     }
@@ -1705,7 +1702,7 @@ mod tests {
     #[test]
     fn test_execution_completed_tasks_described_as_summaries() {
         assert!(
-            EXECUTION_PREFIX_TEMPLATE.contains("summaries"),
+            EXECUTION_PREFIX_TEMPLATE.contains("ummaries"),
             "EXECUTION_PREFIX_TEMPLATE should describe COMPLETED_TASKS as summaries"
         );
         assert!(

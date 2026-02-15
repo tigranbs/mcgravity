@@ -122,6 +122,42 @@ impl MaxIterations {
     }
 }
 
+/// Whether to use a separate model call for task summary generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SummaryGeneration {
+    /// Use inline `TASK_SUMMARY:` extraction only (faster, no extra model call).
+    #[default]
+    InlineOnly,
+    /// Use inline extraction first, fall back to a separate model call.
+    WithModelFallback,
+}
+
+impl SummaryGeneration {
+    /// Cycles to the next option.
+    #[must_use]
+    pub fn next(&self) -> Self {
+        match self {
+            Self::InlineOnly => Self::WithModelFallback,
+            Self::WithModelFallback => Self::InlineOnly,
+        }
+    }
+
+    /// Returns the display name for this option.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::InlineOnly => "Inline Only",
+            Self::WithModelFallback => "Model Fallback",
+        }
+    }
+
+    /// Returns whether this setting enables the separate model call fallback.
+    #[must_use]
+    pub const fn uses_model_fallback(&self) -> bool {
+        matches!(self, Self::WithModelFallback)
+    }
+}
+
 /// Identifiers for settings items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsItem {
@@ -133,6 +169,8 @@ pub enum SettingsItem {
     EnterBehavior,
     /// Maximum iterations for the orchestration loop.
     MaxIterations,
+    /// Summary generation strategy.
+    SummaryGeneration,
 }
 
 impl SettingsItem {
@@ -144,6 +182,7 @@ impl SettingsItem {
             SettingsItem::ExecutionModel,
             SettingsItem::EnterBehavior,
             SettingsItem::MaxIterations,
+            SettingsItem::SummaryGeneration,
         ]
     }
 
@@ -155,6 +194,7 @@ impl SettingsItem {
             Self::ExecutionModel => "Execution Model",
             Self::EnterBehavior => "Enter Key",
             Self::MaxIterations => "Max Iterations",
+            Self::SummaryGeneration => "Summary Mode",
         }
     }
 
@@ -166,6 +206,7 @@ impl SettingsItem {
             Self::ExecutionModel => "AI CLI used for executing tasks",
             Self::EnterBehavior => "Behavior of the Enter key (Submit vs Newline)",
             Self::MaxIterations => "Maximum cycles before stopping",
+            Self::SummaryGeneration => "How task summaries are generated (Inline vs Model)",
         }
     }
 }
@@ -398,6 +439,8 @@ pub struct SettingsState {
     pub enter_behavior: EnterBehavior,
     /// Maximum iterations for the orchestration loop.
     pub max_iterations: MaxIterations,
+    /// Summary generation strategy.
+    pub summary_generation: SummaryGeneration,
     /// Previous mode to return to when closing settings.
     pub previous_mode: Option<AppMode>,
     /// Cached availability status for all AI CLI tools.
@@ -413,6 +456,7 @@ impl Default for SettingsState {
             execution_model: Model::default(),
             enter_behavior: EnterBehavior::default(),
             max_iterations: MaxIterations::default(),
+            summary_generation: SummaryGeneration::default(),
             previous_mode: None,
             model_availability: ModelAvailability::check_all(),
         }
@@ -659,11 +703,12 @@ mod settings_state_tests {
     #[test]
     fn settings_item_all_returns_expected_items() {
         let items = SettingsItem::all();
-        assert_eq!(items.len(), 4);
+        assert_eq!(items.len(), 5);
         assert_eq!(items[0], SettingsItem::PlanningModel);
         assert_eq!(items[1], SettingsItem::ExecutionModel);
         assert_eq!(items[2], SettingsItem::EnterBehavior);
         assert_eq!(items[3], SettingsItem::MaxIterations);
+        assert_eq!(items[4], SettingsItem::SummaryGeneration);
     }
 
     #[test]

@@ -691,6 +691,9 @@ impl App {
             SettingsItem::MaxIterations => {
                 self.settings.max_iterations = self.settings.max_iterations.next();
             }
+            SettingsItem::SummaryGeneration => {
+                self.settings.summary_generation = self.settings.summary_generation.next();
+            }
         }
     }
 
@@ -715,6 +718,9 @@ impl App {
         let planning_executor = planning_model.executor();
         let execution_executor = execution_model.executor();
 
+        // Determine whether to use model fallback for summary generation
+        let use_model_summary = self.settings.summary_generation.uses_model_fallback();
+
         self.set_running(true);
         tokio::spawn(async move {
             let _ = run_flow(
@@ -726,6 +732,7 @@ impl App {
                 execution_executor.as_ref(),
                 max_iterations,
                 paths,
+                use_model_summary,
             )
             .await;
         });

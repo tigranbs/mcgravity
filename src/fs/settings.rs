@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use crate::app::state::{EnterBehavior, MaxIterations, SettingsState};
+use crate::app::state::{EnterBehavior, MaxIterations, SettingsState, SummaryGeneration};
 use crate::core::Model;
 
 /// Directory for mcgravity configuration files.
@@ -30,6 +30,9 @@ pub struct PersistedSettings {
     pub enter_behavior: String,
     /// The maximum iterations setting ("1", "3", "5", "10", "Unlimited").
     pub max_iterations: String,
+    /// The summary generation strategy ("Inline Only" or "Model Fallback").
+    #[serde(default)]
+    pub summary_generation: String,
 }
 
 /// Parses a model from its string name.
@@ -66,6 +69,16 @@ fn parse_max_iterations(s: &str) -> MaxIterations {
     }
 }
 
+/// Parses summary generation from its string name.
+///
+/// Returns `SummaryGeneration::InlineOnly` as the default for unrecognized values.
+fn parse_summary_generation(s: &str) -> SummaryGeneration {
+    match s {
+        "Model Fallback" => SummaryGeneration::WithModelFallback,
+        _ => SummaryGeneration::InlineOnly, // Default
+    }
+}
+
 impl From<&SettingsState> for PersistedSettings {
     fn from(state: &SettingsState) -> Self {
         Self {
@@ -73,6 +86,7 @@ impl From<&SettingsState> for PersistedSettings {
             execution_model: state.execution_model.name().to_string(),
             enter_behavior: state.enter_behavior.name().to_string(),
             max_iterations: state.max_iterations.name().to_string(),
+            summary_generation: state.summary_generation.name().to_string(),
         }
     }
 }
@@ -88,6 +102,7 @@ impl PersistedSettings {
         state.execution_model = parse_model(&self.execution_model);
         state.enter_behavior = parse_enter_behavior(&self.enter_behavior);
         state.max_iterations = parse_max_iterations(&self.max_iterations);
+        state.summary_generation = parse_summary_generation(&self.summary_generation);
     }
 }
 
@@ -160,7 +175,7 @@ pub fn save_settings(path: &Path, settings: &PersistedSettings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::state::{EnterBehavior, MaxIterations, SettingsState};
+    use crate::app::state::{EnterBehavior, MaxIterations, SettingsState, SummaryGeneration};
     use crate::core::Model;
     use crate::fs::McgravityPaths;
     use anyhow::Result;
@@ -184,6 +199,7 @@ mod tests {
             execution_model: "Codex".to_string(),
             enter_behavior: "Submit".to_string(),
             max_iterations: "5".to_string(),
+            summary_generation: String::new(),
         };
 
         let json = serde_json::to_string_pretty(&settings)?;
@@ -201,6 +217,7 @@ mod tests {
             execution_model: "Gemini".to_string(),
             enter_behavior: "Newline".to_string(),
             max_iterations: "10".to_string(),
+            summary_generation: String::new(),
         };
 
         let json = serde_json::to_string_pretty(&settings)?;
@@ -239,6 +256,7 @@ mod tests {
             execution_model: "Codex".to_string(),
             enter_behavior: "Submit".to_string(),
             max_iterations: "Unlimited".to_string(),
+            summary_generation: String::new(),
         };
 
         paths.save_settings(&settings)?;
@@ -360,6 +378,7 @@ mod tests {
         assert_eq!(persisted.execution_model, "Codex");
         assert_eq!(persisted.enter_behavior, "Submit");
         assert_eq!(persisted.max_iterations, "5");
+        assert_eq!(persisted.summary_generation, "Inline Only");
     }
 
     /// Tests `From<&SettingsState> for PersistedSettings` with non-default settings.
@@ -370,6 +389,7 @@ mod tests {
             execution_model: Model::Gemini,
             enter_behavior: EnterBehavior::Newline,
             max_iterations: MaxIterations::Unlimited,
+            summary_generation: SummaryGeneration::WithModelFallback,
             ..Default::default()
         };
 
@@ -379,6 +399,7 @@ mod tests {
         assert_eq!(persisted.execution_model, "Gemini");
         assert_eq!(persisted.enter_behavior, "Newline");
         assert_eq!(persisted.max_iterations, "Unlimited");
+        assert_eq!(persisted.summary_generation, "Model Fallback");
     }
 
     /// Tests `parse_model` for all valid values.
@@ -451,6 +472,7 @@ mod tests {
             execution_model: "Gemini".to_string(),
             enter_behavior: "Newline".to_string(),
             max_iterations: "10".to_string(),
+            summary_generation: String::new(),
         };
 
         let mut state = SettingsState::default();
@@ -470,6 +492,7 @@ mod tests {
             execution_model: String::new(),
             enter_behavior: "invalid".to_string(),
             max_iterations: "99".to_string(),
+            summary_generation: String::new(),
         };
 
         let mut state = SettingsState {
@@ -505,6 +528,7 @@ mod tests {
         assert_eq!(restored.execution_model, original.execution_model);
         assert_eq!(restored.enter_behavior, original.enter_behavior);
         assert_eq!(restored.max_iterations, original.max_iterations);
+        assert_eq!(restored.summary_generation, original.summary_generation);
     }
 
     /// Tests roundtrip with custom settings.
@@ -515,6 +539,7 @@ mod tests {
             execution_model: Model::Gemini,
             enter_behavior: EnterBehavior::Newline,
             max_iterations: MaxIterations::One,
+            summary_generation: SummaryGeneration::WithModelFallback,
             ..Default::default()
         };
 
@@ -526,6 +551,7 @@ mod tests {
         assert_eq!(restored.execution_model, original.execution_model);
         assert_eq!(restored.enter_behavior, original.enter_behavior);
         assert_eq!(restored.max_iterations, original.max_iterations);
+        assert_eq!(restored.summary_generation, original.summary_generation);
     }
 
     /// Tests roundtrip for all model variants.

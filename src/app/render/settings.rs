@@ -26,9 +26,9 @@ impl App {
         let error_line_count = u16::from(planning_unavailable) + u16::from(execution_unavailable);
 
         // Calculate centered popup dimensions
-        // Base height: 14 lines + error lines as needed
+        // Base height: 15 lines + error lines as needed (5 settings + header/footer)
         let popup_width = 52u16;
-        let popup_height = 14u16 + error_line_count;
+        let popup_height = 15u16 + error_line_count;
         let x = area.width.saturating_sub(popup_width) / 2;
         let y = area.height.saturating_sub(popup_height) / 2;
         let popup_area = Rect::new(x, y, popup_width, popup_height);
@@ -61,6 +61,7 @@ impl App {
                 SettingsItem::ExecutionModel => self.settings.execution_model.name(),
                 SettingsItem::EnterBehavior => self.settings.enter_behavior.name(),
                 SettingsItem::MaxIterations => self.settings.max_iterations.name(),
+                SettingsItem::SummaryGeneration => self.settings.summary_generation.name(),
             };
 
             let line = if is_selected {
